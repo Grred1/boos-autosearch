@@ -25,3 +25,6 @@ build/
 # Env files
 .env
 .env.local
+
+# Local test previews
+artifacts/

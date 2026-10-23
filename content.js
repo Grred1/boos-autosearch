@@ -1,164 +1,185 @@
-// ==========================================
-// BOSS直聘 AI海投助手 v1.19.0
-// 主入口文件 - 加载所有模块并初始化
-// ==========================================
-
-(function() {
-    'use strict';
-
-    /**
-     * 初始化反检测功能
-     */
-    const initAntiDetection = () => {
-        const signal = BossUtils.getAbortSignal();
-
-        // 1. 随机鼠标移动（接入AbortController）
-        BossAntiDetection.startIdleMouseMovement(signal);
-
-        // 2. 模拟页面焦点变化（接入AbortController）
-        BossAntiDetection.simulateFocusChanges(signal);
-
-        // 3. rAF时间戳检测防御（接入AbortController）
-        if (typeof BossAntiDetection.startRAFDefense === 'function') {
-            BossAntiDetection.startRAFDefense(signal);
+/* 仅运行于搜索页和公开职位详情页。自动化操作仅限滚动及详情标签读取。 */
+(function () {
+  'use strict';
+  const request = async payload => {
+    const response = await chrome.runtime.sendMessage(payload);
+    if (!response?.ok) throw new Error(response?.error || '扩展后台未响应，请刷新页面');
+    return response.data;
+  };
+  const delay = ms => new Promise(resolve => setTimeout(resolve, ms));
+  if (location.pathname.startsWith('/job_detail/')) {
+    let collecting = false;
+    async function collect() {
+      if (collecting) return;
+      const ready = await request({type:'DETAIL_READY'});
+      if (!ready.collect) return;
+      collecting = true;
+      const deadline = Date.now() + 20000;
+      while (Date.now() < deadline) {
+        const risk = BossDOM.risk();
+        if (risk) { await request({type:'DETAIL_RESULT',error:risk}); return; }
+        const data = BossDOM.detail();
+        if (data.jd) { await request({type:'DETAIL_RESULT',data}); return; }
+        await delay(400);
+      }
+      await request({type:'DETAIL_RESULT',error:'页面结构异常或JD未加载，停止本轮'});
+    }
+    chrome.runtime.onMessage.addListener(msg => {
+      if (msg.type === 'COLLECT_DETAIL') collect().catch(() => {});
+    });
+    collect().catch(() => {});
+    return;
+  }
+  if (!location.pathname.startsWith('/web/geek/jobs')) return;
+  if (document.getElementById('campus-job-assistant')) return;
+  const host = document.createElement('div'); host.id = 'campus-job-assistant';
+  const shadow = host.attachShadow({mode:'closed'});
+  // 所有职位与模型文本均通过textContent写入，不执行HTML。
+  shadow.innerHTML = `<style>
+    :host{all:initial}*{box-sizing:border-box}section{position:fixed;right:20px;bottom:24px;width:330px;background:#fff;color:#172d38;border:1px solid #b8cbd1;border-radius:16px;padding:18px;box-shadow:0 8px 32px #17374826;font:14px/1.6 system-ui;z-index:2147483647}h2{font-size:17px;margin:0 0 8px}p{margin:8px 0}button{border:1px solid #abc1c7;border-radius:7px;background:#f3f7f8;padding:7px 10px;cursor:pointer;margin:3px}button:first-of-type{background:#087d72;color:white}button:disabled{opacity:.45;cursor:default}.note{font-size:12px;color:#536a73}#status{white-space:pre-wrap;max-height:130px;overflow:auto}</style>
+    <section><h2>秋招职位筛选助手</h2><p class="note">少量浏览，生成候选与话术草稿。由你手动发送。低频仍有账号风险。</p><p id="status" role="status" aria-live="polite">先配置条件和简历，再手动开始。</p><button id="start">开始一轮</button><button id="pause" disabled>暂停</button><button id="stop" disabled>停止</button><button id="options">配置与候选清单</button><p class="note">每轮默认处理5个职位，详情访问间隔60秒。轮次结束后休息30分钟，再手动开始。</p></section>`;
+  document.body.appendChild(host);
+  const $ = id => shadow.getElementById(id);
+  let run = null, starting = false, paused = false;
+  let resumePause;
+  const status = message => { $('status').textContent = message; };
+  function controls() {
+    $('start').disabled = !!run || starting;
+    $('pause').disabled = !run; $('stop').disabled = !run;
+    $('pause').textContent = paused ? '继续' : '暂停';
+  }
+  async function checkpoint(current) {
+    if (run !== current || current.controller.signal.aborted) throw new Error('已停止');
+    const risk = BossDOM.risk();
+    if (risk) throw new Error(risk);
+    if (paused) { await new Promise(resolve => { resumePause = resolve; }); return checkpoint(current); }
+  }
+  async function wait(ms, current) {
+    let remaining = ms;
+    while (remaining > 0) {
+      await checkpoint(current);
+      const step = Math.min(250, remaining);
+      await new Promise(resolve => {
+        const done = () => { clearTimeout(timer); current.controller.signal.removeEventListener('abort',done); resolve(); };
+        const timer = setTimeout(done,step);
+        current.controller.signal.addEventListener('abort',done,{once:true});
+      });
+      remaining -= step;
+    }
+    await checkpoint(current);
+  }
+  async function persist(row, current) {
+    await request({type:'SAVE_RECORD',token:current.token,row});
+  }
+  async function finish(current, message) {
+    clearInterval(current.heartbeat);
+    current.controller.abort();
+    paused = false; resumePause?.(); resumePause = null;
+    if (run === current) { run = null; controls(); status(message); }
+    await request({type:'CANCEL_RUN',token:current.token}).catch(() => {});
+    await chrome.storage.local.set({lastRun:{endedAt:new Date().toISOString(),message}}).catch(() => {});
+  }
+  async function browse(current) {
+    const {config:c} = current;
+    let processed = 0, opened = 0, scrolls = 0, lastVisit = 0;
+    try {
+      while (processed < c.maxJobs) {
+        await checkpoint(current);
+        const {records = {}} = await chrome.storage.local.get('records');
+        await checkpoint(current);
+        const job = BossDOM.cards().find(j => !records[j.url]);
+        if (!job) {
+          if (scrolls >= 2) { status('没有更多未浏览职位，本轮结束'); break; }
+          status('当前列表无新职位，等待后向下浏览一次');
+          await wait(c.intervalSeconds * 1000,current);
+          window.scrollBy({top:Math.round(window.innerHeight * 0.75),behavior:'smooth'});
+          scrolls++;
+          await wait(2500,current); continue;
         }
-    };
-
-    /**
-     * 检测环境风险
-     */
-    const checkEnvironmentRisk = () => {
-        const risks = [];
-        if (navigator.webdriver) risks.push('navigator.webdriver is true');
-        if (!window.chrome || !window.chrome.runtime) risks.push('Chrome runtime not found');
-        if (window.screen.width < 1024 || window.screen.height < 768) risks.push('Low screen resolution');
-        if (!navigator.language.includes('zh')) risks.push('Non-Chinese language');
-
-        const timezone = Intl.DateTimeFormat().resolvedOptions().timeZone;
-        const validTimezones = ['Asia/Shanghai', 'Asia/Chongqing', 'Asia/Urumqi', 'Asia/Harbin', 'Asia/Kashgar'];
-        if (!validTimezones.some(tz => timezone.includes(tz))) {
-            risks.push('Non-Chinese timezone: ' + timezone);
+        scrolls = 0;
+        processed++;
+        const row = {...job,...BossCore.assess(job,c),updatedAt:new Date().toISOString(),aiStatus:'未启用',greeting:'',stage:'列表初筛'};
+        if (row.status === 'skip') {
+          await persist(row,current); status(`已处理 ${processed}/${c.maxJobs}：跳过 ${job.title}`); continue;
         }
-
-        if (risks.length > 0) BossUtils.safeLog('环境风险: ' + risks.join(', '));
-
-        return {
-            hasRisk: risks.length > 0,
-            risks,
-            score: Math.max(0, 100 - risks.length * 20)
-        };
-    };
-
-    /**
-     * 检查并执行待发送消息（页面跳转后恢复）
-     */
-    const checkPendingMessage = async () => {
-        try {
-            BossUtils.safeLog('=== checkPendingMessage 开始 ===');
-
-            // 直接从 storage 读取
-            const result = await chrome.storage.local.get('_pendingGreetingMessage');
-            BossUtils.safeLog('storage 读取结果: ' + JSON.stringify(result));
-
-            const pending = result._pendingGreetingMessage;
-            BossUtils.safeLog('pending 对象: ' + JSON.stringify(pending));
-
-            if (pending && pending.message) {
-                // 检查是否过期（超过120秒视为过期）
-                const age = Date.now() - pending.timestamp;
-                BossUtils.safeLog('消息年龄: ' + age + 'ms (' + (age / 1000).toFixed(1) + '秒)');
-
-                if (age > 120000) {
-                    BossUtils.safeLog('消息已过期，清除');
-                    await chrome.storage.local.remove('_pendingGreetingMessage');
-                    logPrint('log-auto', '⚠ 待发送消息已过期', 'info');
-                    return;
-                }
-
-                BossUtils.safeLog('检测到待发送消息，准备自动发送');
-                logPrint('log-auto', '📝 检测到待发送消息，准备自动发送...', 'info');
-
-                // 等待页面完全加载
-                await BossUtils.sleep(2000);
-
-                BossUtils.safeLog('调用 autoSendGreetingMessage...');
-                const sendResult = await BossAutomation.autoSendGreetingMessage();
-                BossUtils.safeLog('自动发送结果: ' + sendResult);
-            } else {
-                BossUtils.safeLog('没有待发送消息');
-            }
-
-            BossUtils.safeLog('=== checkPendingMessage 完成 ===');
-        } catch (e) {
-            BossUtils.safeLog('checkPendingMessage 错误: ' + e.message);
-            BossUtils.safeLog('错误堆栈: ' + e.stack);
-            logPrint('log-auto', '❌ 检查待发送消息失败: ' + e.message, 'fail');
+        if (lastVisit) await wait(Math.max(0,c.intervalSeconds * 1000 - (Date.now() - lastVisit)),current);
+        await checkpoint(current);
+        status(`已处理 ${processed}/${c.maxJobs}，读取详情：${job.title}`);
+        lastVisit = Date.now();
+        let detail;
+        try { detail = await request({type:'READ_DETAIL',token:current.token,url:job.url}); }
+        catch (error) {
+          if (run === current && !current.controller.signal.aborted) {
+            await persist({...row,status:'review',stage:paused ? '暂停时中断' : '读取失败',pending:[...row.pending,error.message]},current);
+          }
+          if (paused) { await checkpoint(current); continue; }
+          throw error;
         }
-    };
-
-    /**
-     * 初始化应用
-     */
-    const init = async () => {
-        try {
-            BossUtils.safeLog('=== content.js init 开始 ===');
-            BossUtils.safeLog('当前URL: ' + window.location.href);
-
-            // 环境风险检测
-            checkEnvironmentRisk();
-
-            // 加载配置
-            await loadConfig();
-            BossUtils.safeLog('配置加载完成');
-
-            // 加载运行日志
-            await BossUtils.loadRunLogs();
-            BossUtils.safeLog('运行日志加载完成');
-
-            // 初始化行为配置文件
-            await BossUtils.initBehaviorProfile();
-
-            // 初始化反检测功能
-            initAntiDetection();
-
-            // 注入UI
-            BossUtils.safeLog('准备注入UI...');
-            if (document.body) {
-                injectUI();
-                BossUtils.safeLog('UI注入完成');
-
-                // 检查是否在聊天页面
-                const isChat = window.location.href.includes('/web/geek/chat');
-                BossUtils.safeLog('是否在聊天页面: ' + isChat);
-
-                if (!isChat) {
-                    initAutoHaiTou();
-                }
-
-                // 恢复运行日志到页面
-                BossUtils.restoreRunLogs();
-                BossUtils.safeLog('运行日志恢复完成');
-            } else {
-                document.addEventListener('DOMContentLoaded', () => {
-                    injectUI();
-                    const isChat = window.location.href.includes('/web/geek/chat');
-                    if (!isChat) {
-                        initAutoHaiTou();
-                    }
-                    BossUtils.restoreRunLogs();
-                });
-            }
-
-            // 检查是否有待发送消息（页面跳转后恢复）
-            BossUtils.safeLog('准备检查待发送消息...');
-            await checkPendingMessage();
-            BossUtils.safeLog('=== content.js init 完成 ===');
-        } catch (e) {
-            BossUtils.safeLog('init 错误: ' + e.message);
-            BossUtils.safeLog('错误堆栈: ' + e.stack);
-        }
-    };
-
-    init();
-
+        await checkpoint(current); opened++;
+        for (const key of ['title','company','salary','city','tags','jd']) if (detail[key]) row[key] = detail[key];
+        Object.assign(row,BossCore.assess(row,c,true),{stage:'已浏览'});
+        if (row.status !== 'skip' && c.aiEnabled) {
+          status(`生成匹配分析与话术：${row.title}`);
+          try {
+            const ai = await request({type:'ANALYZE',token:current.token,job:row});
+            await checkpoint(current);
+            row.analysis = ai; row.greeting = ai.greeting; row.aiStatus = '已生成，请核对';
+            row.reasons.push(...ai.reasons); row.pending.push(...ai.pending); row.gaps = ai.gaps;
+            if (ai.verdict === 'skip') row.status = 'skip';
+            else if (ai.verdict === 'review' || ai.pending.length || ai.gaps.length) row.status = 'review';
+          } catch (error) {
+            await checkpoint(current);
+            row.aiStatus = `失败：${error.message}`; row.status = 'review'; row.greeting = '';
+            row.pending.push('模型调用失败，未生成兜底话术');
+          }
+        } else if (row.status !== 'skip') { row.status = 'review'; row.pending.push('尚未进行AI简历匹配，请人工核对'); }
+        await checkpoint(current); await persist(row,current);
+        status(`已处理 ${processed}/${c.maxJobs}，已读取详情 ${opened}：${row.title}`);
+      }
+      await finish(current,`本轮结束：处理 ${processed} 个，读取详情 ${opened} 个。请到候选清单审核。休息后手动启动下一轮。`);
+    } catch (error) {
+      if (run === current) await finish(current,`已停止：${error.message}`);
+    }
+  }
+  $('start').onclick = async () => {
+    starting = true; controls();
+    try {
+      const risk = BossDOM.risk(); if (risk) throw new Error(risk);
+      if (!BossDOM.cards().length) throw new Error('未识别到职位卡片，请确认搜索页已加载；不会盲目继续浏览');
+      const data = await request({type:'START_RUN'});
+      run = {...data,controller:new AbortController()}; paused = false;
+      const current = run;
+      // 内部心跳只维持扩展后台状态，不向BOSS发起请求。
+      current.heartbeat = setInterval(() => request({type:'PING',token:current.token}).catch(error => {
+        if (run === current) finish(current,`后台状态失效，已停止：${error.message}`);
+      }),15000);
+      browse(run);
+    } catch (error) { status(error.message); }
+    finally { starting = false; controls(); }
+  };
+  // 暂停取消正在读取的详情或模型请求，继续时处理下一条未浏览职位。
+  $('pause').onclick = async () => {
+    const current = run; if (!current) return;
+    $('pause').disabled = true;
+    try {
+      if (!paused) {
+        paused = true;
+        await request({type:'PAUSE_RUN',token:current.token});
+        status('已暂停。当前请求已取消；已中断的职位保留待确认，继续后浏览下一条。');
+      } else {
+        await request({type:'RESUME_RUN',token:current.token});
+        paused = false; resumePause?.(); resumePause = null;
+        status('继续浏览');
+      }
+      controls();
+    } catch (error) { await finish(current,`已停止：${error.message}`); }
+  };
+  $('stop').onclick = () => { if (run) finish(run,'已停止，已完成记录已保存。'); };
+  $('options').onclick = () => request({type:'OPEN_OPTIONS'}).catch(error => status(error.message));
+  const observer = new MutationObserver(() => {
+    if (!run) return;
+    const risk = BossDOM.risk();
+    if (risk) finish(run,`已停止：${risk}`);
+  });
+  observer.observe(document.body,{childList:true,subtree:true});
 })();
