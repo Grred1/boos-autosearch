@@ -116,7 +116,10 @@
           throw error;
         }
         await checkpoint(current); opened++;
-        for (const key of ['title','company','salary','city','tags','jd']) if (detail[key]) row[key] = detail[key];
+        for (const key of ['title','salary','jd']) if (detail[key]) row[key] = detail[key];
+        if (!row.company && detail.company) row.company = detail.company;
+        if (!row.city && detail.city) row.city = detail.city;
+        row.tags = [row.tags,detail.tags].filter(Boolean).join('\n');
         Object.assign(row,BossCore.assess(row,c,true),{stage:'已浏览'});
         if (row.status !== 'skip' && c.aiEnabled) {
           status(`生成匹配分析与话术：${row.title}`);

@@ -28,3 +28,8 @@ build/
 
 # Local test previews
 artifacts/
+
+# Personal resumes, model results and private configuration
+/local/
+/resume.json
+*.pdf

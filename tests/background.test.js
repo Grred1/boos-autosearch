@@ -109,3 +109,25 @@ test('创建详情标签尚未返回时停止，标签返回后也会关闭',asy
   await h.send({type:'CANCEL_RUN',token:data.token});release({id:77});
   assert.equal((await pending).ok,false);assert.deepEqual(h.removed,[77]);
 });
+test('本人关闭简历脱敏后原文进入所选模型请求，Key不进入正文或搜索页配置',async()=>{
+ const h=setup({aiEnabled:true,consent:true,redactResume:false,resume:'示例候选人 13800000000 demo@example.invalid，参与工具调用项目'});h.local.apiKey='dummy-key';
+ let payload;
+ h.sandbox.fetch=async(url,options)=>{payload=JSON.parse(options.body);return {ok:true,json:async()=>({choices:[{message:{content:JSON.stringify({verdict:'review',reasons:[],gaps:[],pending:['需核对资格'],greeting:'您好，我参与过工具调用项目，期待了解岗位。'})}}]})};};
+ const {data}=await h.send({type:'START_RUN'});assert.equal(data.config.resume,undefined);
+ const result=await h.send({type:'ANALYZE',token:data.token,job:{jd:'校招Agent开发'}});
+ assert.equal(result.ok,true);assert.match(payload.messages[1].content,/13800000000/);assert.match(payload.messages[1].content,/demo@example.invalid/);assert.ok(!JSON.stringify(payload).includes('dummy-key'));
+ await h.send({type:'CANCEL_RUN',token:data.token});
+});
+test('缓存JD重新分析无需访问BOSS，应用新条件与公司修正且保留冷却',async()=>{
+ const h=setup({aiEnabled:true,consent:true,redactResume:false,resume:'某大学2027届硕士，完成Agent项目和工具调用',salaryMin:25,graduationYear:'2027'});
+ h.local.apiKey='dummy-key';h.local.cooldownUntil=Date.now()+300000;
+ const until=h.local.cooldownUntil,url='https://www.zhipin.com/job_detail/a.html';
+ h.local.records={[url]:{url,title:'27届校招Agent工程师',salary:'20-35K',jd:'参与Agent工具调用和多智能体系统开发',company:'错误公司'}};
+ let payload;
+ h.sandbox.fetch=async(u,opts)=>{payload=JSON.parse(opts.body);return {ok:true,json:async()=>({choices:[{message:{content:JSON.stringify({verdict:'match',reasons:['项目匹配'],gaps:[],pending:[],greeting:'您好，我参与过Agent工具调用系统开发，希望进一步沟通。'})}}]})};};
+ const r=await h.send({type:'REANALYZE_RECORD',url,company:'待核实企业'},{tab:{id:99},url:'chrome-extension://test/options.html'});
+ assert.equal(r.ok,true);assert.equal(h.created.length,0);assert.equal(h.local.cooldownUntil,until);
+ assert.equal(h.local.records[url].company,'待核实企业');assert.equal(h.local.records[url].status,'review');
+ assert.match(payload.messages[1].content,/待核实企业/);assert.match(h.local.records[url].greeting,/您好，我/);
+ assert.equal(h.local.records[url].analysis.verdict,'match');
+});

@@ -52,3 +52,11 @@ test('扩展不加载聊天页、不申请注入权限、不包含原版发送�
   const runtime=['background.js','content.js','src/dom.js','options.js'].map(p=>fs.readFileSync(p,'utf8')).join('\n');
   for(const unsafe of ['/wapi/','isTrusted','executeScript','btn-startchat','btn-send']) assert.ok(!runtime.includes(unsafe),unsafe);
 });
+test('27届等常见校招年份缩写可与2027匹配',()=>{
+ assert.equal(C.eligibility('【27届校招】Agent工程师','2027').status,'pass');
+ assert.equal(C.eligibility('26届校招Agent开发','2027').status,'review');
+});
+test('招聘方邀请候选人的错误口吻被拒绝',()=>{
+ assert.throws(()=>C.validateAnalysis({verdict:'match',reasons:[],gaps:[],pending:[],greeting:'郭同学你好，看到你在开发Agent，欢迎加入我们团队。'}),/招聘方/);
+ assert.match(C.validateAnalysis({verdict:'match',reasons:[],gaps:[],pending:[],greeting:'您好，我参与过Agent工具调用系统开发，希望进一步沟通。'}).greeting,/您好，我/);
+});

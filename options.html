@@ -11,12 +11,16 @@
 <label>轮次间休息（分钟，至少5）<input name="roundRestMinutes" type="number" min="5" max="1440" required></label>
 <p class="hint">默认每轮5条、详情访问间隔60秒、轮次间休息30分钟。这是保守工程设置，不是安全阈值。每轮结束后需手动开始下一轮。</p>
 <h2>简历与模型</h2>
-<label>用于匹配的简历文本<textarea name="resume" rows="9" placeholder="建议粘贴脱敏后的教育、技能、项目与实习经历"></textarea></label>
+<label>导入本地简历 JSON<input id="resume-file" type="file" accept=".json,application/json"></label>
+<p class="hint">按 config/resume.example.json 填写，真实文件放在 Git 忽略的 local/resume.json。导入只读取本地文件，不自动发送。</p>
+<p id="import-status" role="status" aria-live="polite"></p>
+<label>用于匹配的简历文本<textarea name="resume" rows="9" placeholder="导入后可在此检查和编辑完整简历"></textarea></label>
+<label class="check"><input name="redactResume" type="checkbox">发送前移除简历中的手机号和邮箱（可关闭以发送完整简历）</label>
 <label class="check"><input name="aiEnabled" type="checkbox">启用模型匹配与话术草稿</label>
 <div class="pair"><label>模型服务<select name="provider"><option value="deepseek">DeepSeek</option><option value="openai">OpenAI</option></select></label><label>模型名称<input name="model" required></label></div>
 <label>API Key<input id="api-key" type="password" autocomplete="off" placeholder="仅保存在本机扩展存储"></label>
-<p class="hint">本机存储未加密。只向所选服务的固定官方API域名发送请求，不包含BOSS Cookie。手机号和邮箱会自动替换；姓名、地址等请先手动脱敏。</p>
-<label class="check"><input name="consent" type="checkbox">我同意向所选模型服务发送：脱敏简历（最多24000字符）、岗位名称、公司、薪资、城市、JD（最多16000字符）和毕业年份／方向／薪资要求，用于分析与生成草稿。</label>
+<p class="hint">本机存储未加密。只向所选服务的固定官方API域名发送请求，不包含BOSS Cookie。简历根据上方选项保留全文或移除手机号邮箱；发送范围需本人确认。</p>
+<label class="check"><input name="consent" type="checkbox">我同意向所选模型服务发送：简历文本（按上方脱敏选项，最多24000字符）、岗位名称、公司、薪资、城市、JD（最多16000字符）和毕业年份／方向／薪资要求，用于分析与生成草稿。</label>
 <button type="submit">保存配置并授权模型域名</button><p id="save-status" role="status" aria-live="polite"></p>
 </form></section>
 <section class="results"><div class="toolbar"><h2>候选清单</h2><button id="refresh">刷新</button><button id="export">导出记录 JSON</button></div>
@@ -24,4 +28,4 @@
 <p class="hint">话术可以修改并保存或复制。职位链接需手动打开，不会自动发起沟通。已浏览记录自动去重；需重新分析某条时可将其移出记录。</p>
 <div id="records"></div></section></div>
 <footer>基于 mrcxsy/boss-auto-apply 改造 · Apache-2.0 · 仅生成求职辅助信息，使用前请核对真实经历。</footer>
-</main><script src="src/core.js"></script><script src="options.js"></script></body></html>
+</main><script src="src/core.js"></script><script src="src/resume.js"></script><script src="options.js"></script></body></html>

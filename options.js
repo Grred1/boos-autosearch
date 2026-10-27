@@ -3,7 +3,7 @@ const form = document.getElementById('settings');
 const $ = id => document.getElementById(id);
 let config = {...BossCore.defaults};
 const numberFields = ['salaryMin','maxJobs','intervalSeconds','roundRestMinutes'];
-const boolFields = ['aiEnabled','consent'];
+const boolFields = ['aiEnabled','consent','redactResume'];
 const labels = {candidate:'候选',review:'待确认',skip:'已跳过'};
 const providerOrigins = {deepseek:'https://api.deepseek.com/*',openai:'https://api.openai.com/*'};
 function say(message, error = false) { $('save-status').textContent = message; $('save-status').className = error ? 'error':'success'; }
@@ -21,6 +21,21 @@ form.elements.provider.onchange = () => {
   form.elements.model.value = form.elements.provider.value === 'deepseek' ? 'deepseek-chat' : '';
   form.elements.consent.checked = false;
 };
+form.elements.redactResume.onchange = () => { form.elements.consent.checked = false; };
+$('resume-file').onchange = async event => {
+  const file = event.target.files?.[0];
+  if (!file) return;
+  try {
+    if (file.size > 1024 * 1024) throw new Error('简历文件不能超过1MB');
+    const text = BossResume.parseResume(await file.text());
+    form.elements.resume.value = text;
+    form.elements.consent.checked = false;
+    $('import-status').textContent = `已导入 ${text.length} 字符。请检查简历并保存配置；此时尚未发送给模型。`;
+    $('import-status').className = 'success';
+  } catch (error) {
+    $('import-status').textContent = error.message; $('import-status').className = 'error';
+  } finally { event.target.value = ''; }
+};
 form.onsubmit = async event => {
   event.preventDefault();
   try {
@@ -29,6 +44,7 @@ form.onsubmit = async event => {
       const field = form.elements.namedItem(key);
       raw[key] = boolFields.includes(key) ? field.checked : numberFields.includes(key) ? Number(field.value) : field.value.trim();
     }
+    if (raw.resume.length > 24000) throw new Error('简历超过24000字符，请精简后再保存');
     if (raw.aiEnabled && (!raw.consent || !raw.resume || !$('api-key').value.trim())) throw new Error('启用AI需填写简历、API Key并勾选数据发送同意');
     if (raw.aiEnabled) {
       const granted = await chrome.permissions.request({origins:[providerOrigins[raw.provider]]});
@@ -69,6 +85,8 @@ async function render() {
     if (row.eligibility) card.append(element('p',`秋招资格：${row.eligibility}`,'meta'));
     list(card,'筛选与匹配理由',row.reasons);list(card,'待确认',row.pending);list(card,'技能／经历缺口',row.gaps);
     if (row.jd) { const details = element('details');details.append(element('summary','查看JD'),element('pre',row.jd));card.append(details); }
+    const companyLabel = element('label','公司名称（可核对修正）');
+    const companyField = element('input');companyField.value=row.company || '';companyLabel.append(companyField);card.append(companyLabel);
     const draft = element('textarea');draft.value = row.greeting || ''; draft.placeholder = '暂无话术；可手动补充。'; draft.setAttribute('aria-label',`${row.title}的话术草稿`);card.append(draft);
     const note = element('p','','hint');
     const save = element('button','保存话术');save.onclick = async () => {
@@ -81,7 +99,16 @@ async function render() {
       if (!confirm('移出后，下次浏览可能再次处理该职位。确定移出？')) return;
       try { await updateRecord(row.url,{remove:true});await render(); } catch(e) { note.textContent=e.message; }
     };
-    card.append(save,copy,remove,note);target.append(card);
+    const retry = element('button','重新分析已保存JD');retry.disabled=!row.jd;
+    retry.onclick = async () => {
+      retry.disabled=true;note.textContent='正在分析本地已保存的JD，不会访问BOSS…';
+      try {
+        const response=await chrome.runtime.sendMessage({type:'REANALYZE_RECORD',url:row.url,company:companyField.value.trim()});
+        if (!response?.ok) throw new Error(response?.error || '重新分析失败');
+        await render();
+      } catch(error) {note.textContent=error.message;retry.disabled=false;}
+    };
+    card.append(save,copy,retry,remove,note);target.append(card);
   }
   if (!target.children.length) target.append(element('p','暂无记录。请在BOSS搜索页配置好官方搜索条件，再开始一轮浏览。','hint'));
 }

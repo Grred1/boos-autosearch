@@ -23,7 +23,7 @@ const path = require('node:path');
     }}};
     Object.defineProperty(navigator,'clipboard',{value:{writeText:async text=>{window.__copied=text;}}});
   },{sample});
-  await page.addScriptTag({path:'src/core.js'});await page.addScriptTag({path:'options.js'});
+  await page.addScriptTag({path:'src/core.js'});await page.addScriptTag({path:'src/resume.js'});await page.addScriptTag({path:'options.js'});
   await page.getByRole('heading',{name:sample.title}).waitFor();
   assert.equal(await page.locator('.job img').count(),0);
   await page.locator('.job h3 a').evaluate(el=>{el.textContent='Agent应用开发工程师';});
