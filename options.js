@@ -3,7 +3,7 @@ const form = document.getElementById('settings');
 const $ = id => document.getElementById(id);
 let config = {...BossCore.defaults};
 const numberFields = ['salaryMin','maxJobs','intervalSeconds','roundRestMinutes'];
-const boolFields = ['aiEnabled','consent','redactResume'];
+const boolFields = ['aiEnabled','consent','redactResume','reviewOnMatch'];
 const labels = {candidate:'候选',review:'待确认',skip:'已跳过'};
 const providerOrigins = {deepseek:'https://api.deepseek.com/*',openai:'https://api.openai.com/*'};
 function say(message, error = false) { $('save-status').textContent = message; $('save-status').className = error ? 'error':'success'; }
@@ -88,9 +88,10 @@ async function render() {
     const companyLabel = element('label','公司名称（可核对修正）');
     const companyField = element('input');companyField.value=row.company || '';companyLabel.append(companyField);card.append(companyLabel);
     const draft = element('textarea');draft.value = row.greeting || ''; draft.placeholder = '暂无话术；可手动补充。'; draft.setAttribute('aria-label',`${row.title}的话术草稿`);card.append(draft);
+    const reason = element('input');reason.placeholder='话术修改原因（选填）';reason.setAttribute('aria-label','话术修改原因');card.append(reason);
     const note = element('p','','hint');
     const save = element('button','保存话术');save.onclick = async () => {
-      try { await updateRecord(row.url,{greeting:draft.value});note.textContent='话术已保存'; } catch(e) { note.textContent=e.message; }
+      try { await updateRecord(row.url,{greeting:draft.value,note:reason.value,revision:row.draftRevision || 0});const {records={}}=await chrome.storage.local.get('records');row.draftRevision=records[row.url]?.draftRevision || 0;note.textContent='话术已保存；修改记录仅保存在本机'; } catch(e) { note.textContent=e.message; }
     };
     const copy = element('button','复制话术');copy.onclick = async () => {
       try { await navigator.clipboard.writeText(draft.value);note.textContent='已复制，请核对后手动发送'; } catch { note.textContent='复制失败，请选中文本手动复制'; }
@@ -100,6 +101,9 @@ async function render() {
       try { await updateRecord(row.url,{remove:true});await render(); } catch(e) { note.textContent=e.message; }
     };
     const retry = element('button','重新分析已保存JD');retry.disabled=!row.jd;
+    const review=element('button','打开JD审核与发送');review.onclick=async()=>{
+      try {await updateRecord(row.url,{greeting:draft.value,note:reason.value,revision:row.draftRevision || 0});const r=await chrome.runtime.sendMessage({type:'OPEN_RECORD_REVIEW',url:row.url});if(!r?.ok)throw Error(r?.error || '打开失败');await render();}catch(e){note.textContent=e.message;}
+    };
     retry.onclick = async () => {
       retry.disabled=true;note.textContent='正在分析本地已保存的JD，不会访问BOSS…';
       try {
@@ -108,7 +112,8 @@ async function render() {
         await render();
       } catch(error) {note.textContent=error.message;retry.disabled=false;}
     };
-    card.append(save,copy,retry,remove,note);target.append(card);
+    if(row.communication){draft.disabled=reason.disabled=save.disabled=retry.disabled=remove.disabled=true;note.textContent=`沟通状态：${BossReview.stateLabel(row.communication.state)}；不确定时请到BOSS核对，不会重复发送。`;review.onclick=async()=>{const r=await chrome.runtime.sendMessage({type:'OPEN_RECORD_REVIEW',url:row.url});if(!r?.ok)note.textContent=r?.error || '打开失败';};}
+    card.append(save,copy,review,retry,remove,note);target.append(card);
   }
   if (!target.children.length) target.append(element('p','暂无记录。请在BOSS搜索页配置好官方搜索条件，再开始一轮浏览。','hint'));
 }
@@ -118,5 +123,10 @@ $('export').onclick = async () => {
   const {records = {}} = await chrome.storage.local.get('records');
   const url = URL.createObjectURL(new Blob([JSON.stringify(Object.values(records),null,2)],{type:'application/json'}));
   const a = element('a');a.href=url;a.download=`职位候选-${new Date().toISOString().slice(0,10)}.json`;a.click();setTimeout(()=>URL.revokeObjectURL(url),1000);
+};
+$('export-feedback').onclick=async()=>{
+  const {feedback=[]}=await chrome.storage.local.get('feedback');
+  const url=URL.createObjectURL(new Blob([JSON.stringify({schemaVersion:1,exportedAt:new Date().toISOString(),feedback},null,2)],{type:'application/json'}));
+  const a=element('a');a.href=url;a.download=`话术修改记录-${new Date().toISOString().slice(0,10)}.json`;a.click();setTimeout(()=>URL.revokeObjectURL(url),1000);
 };
 load().catch(e=>say(e.message,true));

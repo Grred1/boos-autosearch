@@ -7,7 +7,7 @@ let privateValues = [];
 try { privateValues = Object.values(JSON.parse(fs.readFileSync('local/resume.json','utf8')).personal || {}).filter(v=>typeof v==='string' && v.length>=3); } catch { /* 未配置本地简历时仍进行路径及凭据检查 */ }
 let failed = false;
 for (const name of names) {
-  if (name.startsWith('local/') || name.endsWith('.pdf') || name === 'resume.json') {
+  if (name.startsWith('local/') || /\.pdf$/i.test(name) || name === 'resume.json' || /(?:话术修改记录|职位候选)-.*\.json$/.test(name)) {
     console.error('禁止提交个人文件：'+name);failed=true;continue;
   }
   if (/\.(png|jpe?g|gif|ico|webp)$/i.test(name)) continue;

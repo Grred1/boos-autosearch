@@ -1,7 +1,7 @@
 /* 复用上游关键词筛选及薪资解析思路，Apache-2.0。纯函数可离线验证。 */
 (function (root) {
   'use strict';
-  const defaults = { keywords:'Agent,智能体,算法,AI,大模型,LLM,RAG', excludes:'AI销售,课程推广,数据标注', cities:'', salaryMin:0, graduationYear:'', direction:'all', maxJobs:5, intervalSeconds:60, roundRestMinutes:30, resume:'', aiEnabled:false, model:'deepseek-chat', provider:'deepseek', consent:false, redactResume:true };
+  const defaults = { keywords:'Agent,智能体,算法,AI,大模型,LLM,RAG', excludes:'AI销售,课程推广,数据标注', cities:'', salaryMin:0, graduationYear:'', direction:'all', maxJobs:5, intervalSeconds:60, roundRestMinutes:30, resume:'', aiEnabled:false, model:'deepseek-chat', provider:'deepseek', consent:false, redactResume:true, reviewOnMatch:true };
   const words = x => String(x || '').split(/[,，、\n]+/).map(s => s.trim()).filter(Boolean);
   const contains = (text, term) => /^[a-z]+$/i.test(term) ? new RegExp(`(^|[^a-z])${term}([^a-z]|$)`, 'i').test(text) : String(text).toLowerCase().includes(term.toLowerCase());
   function normalizeConfig(raw = {}) {
@@ -13,7 +13,7 @@
     if (!['all','application','algorithm'].includes(c.direction)) c.direction = 'all';
     if (!['deepseek','openai'].includes(c.provider)) c.provider = 'deepseek';
     c.redactResume = c.redactResume !== false;
-    for (const key of ['aiEnabled','consent']) c[key] = c[key] === true;
+    for (const key of ['aiEnabled','consent','reviewOnMatch']) c[key] = c[key] === true;
     for (const key of ['keywords','excludes','cities','resume','model']) c[key] = typeof c[key] === 'string' ? c[key] : defaults[key];
     return c;
   }

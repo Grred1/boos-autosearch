@@ -23,12 +23,12 @@ const path = require('node:path');
     }}};
     Object.defineProperty(navigator,'clipboard',{value:{writeText:async text=>{window.__copied=text;}}});
   },{sample});
-  await page.addScriptTag({path:'src/core.js'});await page.addScriptTag({path:'src/resume.js'});await page.addScriptTag({path:'options.js'});
+  await page.addScriptTag({path:'src/core.js'});await page.addScriptTag({path:'src/resume.js'});await page.addScriptTag({path:'src/review.js'});await page.addScriptTag({path:'options.js'});
   await page.getByRole('heading',{name:sample.title}).waitFor();
   assert.equal(await page.locator('.job img').count(),0);
   await page.locator('.job h3 a').evaluate(el=>{el.textContent='Agent应用开发工程师';});
   await page.getByRole('textbox',{name:sample.title+'的话术草稿'}).fill('仅包含真实经历的新草稿');
-  await page.getByRole('button',{name:'保存话术',exact:true}).click();await page.getByText('话术已保存',{exact:true}).waitFor();
+  await page.getByRole('button',{name:'保存话术',exact:true}).click();await page.getByText('话术已保存；修改记录仅保存在本机',{exact:true}).waitFor();
   assert.equal(await page.evaluate(url=>window.__db.records[url].greeting,sample.url),'仅包含真实经历的新草稿');
   await page.getByRole('button',{name:'复制话术',exact:true}).click();await page.getByText('已复制，请核对后手动发送').waitFor();
   assert.equal(await page.evaluate(()=>window.__copied),'仅包含真实经历的新草稿');
@@ -47,7 +47,7 @@ const path = require('node:path');
     const db={records:{}};window.__db=db;window.__calls=[];let detailReject;
     window.chrome={storage:{local:{get:async key=>({[key]:structuredClone(db[key])}),set:async values=>Object.assign(db,values)}},runtime:{sendMessage:async msg=>{
       window.__calls.push(msg.type);
-      if(msg.type==='START_RUN')return {ok:true,data:{token:'test',config:BossCore.normalizeConfig({maxJobs:2,graduationYear:'2027',salaryMin:25,intervalSeconds:30})}};
+      if(msg.type==='START_RUN')return {ok:true,data:{token:'test',config:BossCore.normalizeConfig({maxJobs:2,graduationYear:'2027',salaryMin:25,intervalSeconds:30,reviewOnMatch:false})}};
       if(msg.type==='READ_DETAIL')return new Promise((resolve,reject)=>{detailReject=reject;window.__finishDetail=()=>resolve({ok:true,data:{jd:'2027届校招，开发Agent工具调用'}});});
       if(msg.type==='SAVE_RECORD'){db.records[msg.row.url]=msg.row;return {ok:true};}
       if(msg.type==='PAUSE_RUN'||msg.type==='CANCEL_RUN'){if(detailReject){detailReject(new Error(msg.type==='PAUSE_RUN'?'已暂停':'已停止'));detailReject=null;}return {ok:true};}

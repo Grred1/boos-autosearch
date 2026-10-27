@@ -44,13 +44,14 @@ test('移除手机邮箱，模型格式错误不产生默认话术',()=>{
   assert.throws(()=>C.validateAnalysis({verdict:'match',greeting:'虚构'}));
   assert.equal(C.validateAnalysis({verdict:'skip',reasons:[],gaps:[],pending:[],greeting:'不应发送'}).greeting,'');
 });
-test('扩展不加载聊天页、不申请注入权限、不包含原版发送和伪装模块',()=>{
+test('聊天页只加载逐条审核流程，不申请注入权限或加载原版伪装模块',()=>{
   const m=JSON.parse(fs.readFileSync('manifest.json'));
-  assert.deepEqual(m.permissions,['storage']);assert.ok(!JSON.stringify(m.content_scripts).includes('/chat'));
+  assert.deepEqual(m.permissions,['storage']);assert.ok(JSON.stringify(m.content_scripts).includes('/chat'));
   assert.ok(!JSON.stringify(m).includes('MAIN'));assert.ok(!JSON.stringify(m).includes('anti-detection'));
   for(const name of ['src/modules/automation.js','src/modules/anti-detection.js','src/modules/event-trusted.js']) assert.ok(!fs.existsSync(name));
-  const runtime=['background.js','content.js','src/dom.js','options.js'].map(p=>fs.readFileSync(p,'utf8')).join('\n');
-  for(const unsafe of ['/wapi/','isTrusted','executeScript','btn-startchat','btn-send']) assert.ok(!runtime.includes(unsafe),unsafe);
+  const runtime=['background.js','content.js','src/dom.js','src/chat-dom.js','review-content.js','options.js'].map(p=>fs.readFileSync(p,'utf8')).join('\n');
+  for(const unsafe of ['/wapi/','trustedDispatchEvent','executeScript','simulateHumanClick','simulateTyping']) assert.ok(!runtime.includes(unsafe),unsafe);
+  assert.ok(fs.readFileSync('review-content.js','utf8').includes('if(!event.isTrusted'));
 });
 test('27届等常见校招年份缩写可与2027匹配',()=>{
  assert.equal(C.eligibility('【27届校招】Agent工程师','2027').status,'pass');

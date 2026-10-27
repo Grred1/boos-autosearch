@@ -4,9 +4,10 @@ const assert = require('node:assert/strict');
 const vm = require('node:vm');
 const fs = require('node:fs');
 const C = require('../src/core');
+const R = require('../src/review');
 const tick = () => new Promise(resolve=>setImmediate(resolve));
 function setup(settings={}) {
-  const local={settings:C.normalizeConfig(settings)},session={},listeners={},removed=[],created=[];
+  const local={settings:C.normalizeConfig({reviewOnMatch:false,...settings})},session={},listeners={},removed=[],created=[];
   let nextId=20, onMessage;
   const store = data => ({
     async get(keys) {if(typeof keys==='string')return {[keys]:structuredClone(data[keys])};return Object.fromEntries(keys.map(k=>[k,structuredClone(data[k])]));},
@@ -16,10 +17,10 @@ function setup(settings={}) {
     runtime:{getURL:p=>'chrome-extension://test/'+p,openOptionsPage:async()=>{},onMessage:{addListener:fn=>{onMessage=fn;}}},
     action:{onClicked:{addListener:()=>{}}},permissions:{contains:async()=>true},
     storage:{local:store(local),session:store(session)},
-    tabs:{create:async opts=>{const tab={id:nextId++,...opts};created.push(tab);return tab;},remove:async id=>{removed.push(id);},get:async id=>created.find(t=>t.id===id),sendMessage:async()=>{},
+    tabs:{create:async opts=>{const tab={id:nextId++,...opts};created.push(tab);return tab;},update:async(id,opts)=>Object.assign(created.find(t=>t.id===id),opts),remove:async id=>{removed.push(id);},get:async id=>created.find(t=>t.id===id) || {id},sendMessage:async()=>{},
       onRemoved:{addListener:fn=>listeners.removed=fn},onUpdated:{addListener:fn=>listeners.updated=fn}}
   };
-  const sandbox={chrome,BossCore:C,importScripts:()=>{},setTimeout,clearTimeout,AbortController,crypto:require('node:crypto').webcrypto,Date,URL,fetch:async()=>{throw Error('测试禁止真实网络');}};
+  const sandbox={chrome,BossCore:C,BossReview:R,importScripts:()=>{},setTimeout,clearTimeout,AbortController,crypto:require('node:crypto').webcrypto,Date,URL,fetch:async()=>{throw Error('测试禁止真实网络');}};
   vm.runInNewContext(fs.readFileSync('background.js','utf8'),sandbox);
   const owner={tab:{id:1},url:'https://www.zhipin.com/web/geek/jobs?query=Agent'};
   const send=(msg,sender=owner)=>new Promise(resolve=>onMessage(msg,sender,resolve));
@@ -130,4 +131,65 @@ test('缓存JD重新分析无需访问BOSS，应用新条件与公司修正且�
  assert.equal(h.local.records[url].company,'待核实企业');assert.equal(h.local.records[url].status,'review');
  assert.match(payload.messages[1].content,/待核实企业/);assert.match(h.local.records[url].greeting,/您好，我/);
  assert.equal(h.local.records[url].analysis.verdict,'match');
+});
+
+const jobURL='https://www.zhipin.com/job_detail/review.html';
+const detailSender={tab:{id:8},url:jobURL};
+function reviewSetup(){const h=setup();h.local.records={[jobURL]:{url:jobURL,title:'Agent工程师',company:'示例公司',salary:'25-35K',jd:'2027届校招',status:'candidate',greeting:'您好，我参与过Agent工具调用开发，希望进一步沟通。',generation:{promptVersion:R.PROMPT_VERSION,model:'test'}}};return h;}
+async function approve(h){const row=h.local.records[jobURL];return h.send({type:'AUTHORIZE_SEND',greeting:row.greeting,revision:row.draftRevision || 0,acknowledged:true,recruiter:'陈女士'},detailSender);}
+test('审核模式复用原JD标签，不重复访问，展示后停止浏览并阻止下一轮',async()=>{
+ const h=setup({reviewOnMatch:true});const {data}=await h.send({type:'START_RUN'});
+ const read=h.send({type:'READ_DETAIL',token:data.token,url:jobURL});await tick();
+ await h.send({type:'DETAIL_RESULT',data:{jd:'2027届Agent开发'}},{tab:{id:20},url:jobURL});assert.equal((await read).ok,true);assert.deepEqual(h.removed,[]);
+ await h.send({type:'SAVE_RECORD',token:data.token,row:{url:jobURL,jd:'2027届Agent开发',status:'review',greeting:'原稿'}});
+ assert.equal((await h.send({type:'PRESENT_REVIEW',token:data.token,url:jobURL})).ok,true);assert.equal(h.created.length,1);assert.equal(h.created[0].active,true);assert.deepEqual(h.removed,[]);
+ assert.equal(h.local.activeReviewURL,jobURL);assert.equal((await h.send({type:'PING',token:data.token})).ok,false);
+ h.local.cooldownUntil=0;assert.match((await h.send({type:'START_RUN'})).error,/等待审核/);
+ assert.equal((await h.send({type:'SKIP_REVIEW'},{tab:{id:20},url:jobURL})).ok,true);assert.equal(h.local.activeReviewURL,null);
+ const again=await h.send({type:'START_RUN'});assert.equal(again.ok,true);await h.send({type:'CANCEL_RUN',token:again.data.token});
+});
+test('发送授权只给当前JD，陈旧话术及未确认拒绝，确认同时留下本地记录',async()=>{
+ const h=reviewSetup();const row=h.local.records[jobURL];
+ assert.equal((await h.send({type:'AUTHORIZE_SEND',greeting:row.greeting,revision:0,acknowledged:true,recruiter:'陈女士'})).ok,false);
+ assert.equal((await h.send({type:'AUTHORIZE_SEND',greeting:row.greeting,revision:0,acknowledged:false,recruiter:'陈女士'},detailSender)).ok,false);
+ assert.equal((await h.send({type:'AUTHORIZE_SEND',greeting:'其他文本',revision:0,acknowledged:true,recruiter:'陈女士'},detailSender)).ok,false);
+ const r=await approve(h);assert.equal(r.ok,true);assert.equal(h.local.feedback.length,1);assert.equal(h.local.feedback[0].action,'confirm');
+ assert.equal((await approve(h)).ok,false);
+ assert.equal((await h.send({type:'EDIT_RECORD',url:jobURL,greeting:'偷偷改稿'},{url:'chrome-extension://test/options.html'})).ok,false);
+});
+test('只对绑定会话授权一次发送，错误对象、新标签和重复点击均拒绝',async()=>{
+ const h=reviewSetup(),{data}=await approve(h),id=data.intent.id;
+ const step=(phase,sender=detailSender,identity={url:jobURL,recruiter:'陈女士'})=>h.send({type:'SEND_STEP',id,phase,identity},sender);
+ assert.equal((await step('ui_sent')).ok,false);assert.equal((await step('opening')).ok,true);assert.equal((await step('opening')).ok,false);
+ const unrelated={tab:{id:77},url:'https://www.zhipin.com/web/geek/chat'};
+ assert.equal((await h.send({type:'GET_SEND_INTENT'},unrelated)).data.intent,undefined);assert.equal((await step('dispatching',unrelated)).ok,false);
+ const chatSender={tab:{id:8},url:'https://www.zhipin.com/web/geek/chat'};
+ assert.equal((await step('dispatching',chatSender,{url:jobURL,recruiter:'王女士'})).ok,false);
+ assert.equal((await step('dispatching',chatSender)).ok,true);assert.equal((await step('dispatching',chatSender)).ok,false);
+ assert.equal((await step('ui_sent',chatSender)).ok,true);assert.equal(h.local.records[jobURL].communication.state,'ui_sent');assert.equal(h.session.sendIntent,null);
+ assert.equal((await step('dispatching',chatSender)).ok,false);assert.equal((await approve(h)).ok,false);
+});
+test('超时或不确定结果不会重放授权，刷新聊天页不恢复已提交的发送',async()=>{
+ const h=reviewSetup(),{data}=await approve(h),id=data.intent.id;
+ await h.send({type:'SEND_STEP',id,phase:'opening'},detailSender);
+ await h.send({type:'SEND_STEP',id,phase:'dispatching',identity:{url:jobURL,recruiter:'陈女士'}},detailSender);
+ assert.equal((await h.send({type:'GET_SEND_INTENT'},detailSender)).data.intent,undefined);
+ assert.equal((await h.send({type:'SEND_STEP',id,phase:'uncertain',error:'页面没有回显'},detailSender)).ok,true);
+ assert.equal(h.local.records[jobURL].communication.state,'uncertain');assert.equal((await approve(h)).ok,false);
+});
+test('从当前JD打开的新聊天标签可承接授权，但授权过期后不能点击发送',async()=>{
+ const h=reviewSetup(),{data}=await approve(h),id=data.intent.id;
+ h.created.push({id:70,openerTabId:8,url:'https://www.zhipin.com/web/geek/chat'});
+ const child={tab:{id:70},url:'https://www.zhipin.com/web/geek/chat'};
+ assert.equal((await h.send({type:'GET_SEND_INTENT'},child)).data.intent.id,id);
+ await h.send({type:'SEND_STEP',id,phase:'opening'},detailSender);
+ h.session.sendIntent.expiresAt=Date.now()-1;
+ assert.equal((await h.send({type:'SEND_STEP',id,phase:'dispatching',identity:{url:jobURL,recruiter:'陈女士'}},child)).ok,false);
+});
+test('人工核对不确定结果可结束本条审核，但不会解除重复发送锁',async()=>{
+ const h=reviewSetup();h.local.activeReviewURL=jobURL;const {data}=await approve(h);
+ await h.send({type:'SEND_STEP',id:data.intent.id,phase:'uncertain',error:'未确认回显'},detailSender);
+ assert.equal((await h.send({type:'ACK_SEND_RESULT'},detailSender)).ok,true);assert.equal(h.local.activeReviewURL,null);
+ assert.ok(h.local.records[jobURL].communication.manualCheckedAt);assert.equal((await approve(h)).ok,false);
+ const next=await h.send({type:'START_RUN'});assert.equal(next.ok,true);await h.send({type:'CANCEL_RUN',token:next.data.token});
 });

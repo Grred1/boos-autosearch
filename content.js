@@ -1,4 +1,4 @@
-/* 仅运行于搜索页和公开职位详情页。自动化操作仅限滚动及详情标签读取。 */
+/* 搜索页低频浏览，命中后保留JD并停止；发送由独立审核模块处理。 */
 (function () {
   'use strict';
   const request = async payload => {
@@ -37,7 +37,7 @@
   // 所有职位与模型文本均通过textContent写入，不执行HTML。
   shadow.innerHTML = `<style>
     :host{all:initial}*{box-sizing:border-box}section{position:fixed;right:20px;bottom:24px;width:330px;background:#fff;color:#172d38;border:1px solid #b8cbd1;border-radius:16px;padding:18px;box-shadow:0 8px 32px #17374826;font:14px/1.6 system-ui;z-index:2147483647}h2{font-size:17px;margin:0 0 8px}p{margin:8px 0}button{border:1px solid #abc1c7;border-radius:7px;background:#f3f7f8;padding:7px 10px;cursor:pointer;margin:3px}button:first-of-type{background:#087d72;color:white}button:disabled{opacity:.45;cursor:default}.note{font-size:12px;color:#536a73}#status{white-space:pre-wrap;max-height:130px;overflow:auto}</style>
-    <section><h2>秋招职位筛选助手</h2><p class="note">少量浏览，生成候选与话术草稿。由你手动发送。低频仍有账号风险。</p><p id="status" role="status" aria-live="polite">先配置条件和简历，再手动开始。</p><button id="start">开始一轮</button><button id="pause" disabled>暂停</button><button id="stop" disabled>停止</button><button id="options">配置与候选清单</button><p class="note">每轮默认处理5个职位，详情访问间隔60秒。轮次结束后休息30分钟，再手动开始。</p></section>`;
+    <section><h2>秋招职位筛选助手</h2><p class="note">低频浏览，命中后停在JD等待本人审核；只在你逐条确认后执行沟通。低频仍有账号风险。</p><p id="status" role="status" aria-live="polite">先配置条件和简历，再手动开始。</p><button id="start">开始一轮</button><button id="pause" disabled>暂停</button><button id="stop" disabled>停止</button><button id="options">配置与候选清单</button><p class="note">数量、详情间隔和轮次休息按已保存配置执行。审核结束后需手动开始下一轮。</p></section>`;
   document.body.appendChild(host);
   const $ = id => shadow.getElementById(id);
   let run = null, starting = false, paused = false;
@@ -126,7 +126,7 @@
           try {
             const ai = await request({type:'ANALYZE',token:current.token,job:row});
             await checkpoint(current);
-            row.analysis = ai; row.greeting = ai.greeting; row.aiStatus = '已生成，请核对';
+            row.analysis = ai; row.greeting = ai.greeting;row.generatedGreeting=ai.greeting;row.generation=ai.generation;row.draftRevision=0; row.aiStatus = '已生成，请核对';
             row.reasons.push(...ai.reasons); row.pending.push(...ai.pending); row.gaps = ai.gaps;
             if (ai.verdict === 'skip') row.status = 'skip';
             else if (ai.verdict === 'review' || ai.pending.length || ai.gaps.length) row.status = 'review';
@@ -137,6 +137,11 @@
           }
         } else if (row.status !== 'skip') { row.status = 'review'; row.pending.push('尚未进行AI简历匹配，请人工核对'); }
         await checkpoint(current); await persist(row,current);
+        if(c.reviewOnMatch && row.status!=='skip') {
+          await request({type:'PRESENT_REVIEW',token:current.token,url:row.url});
+          await finish(current,`已停在JD等待审核：${row.title}。确认或暂不沟通后，再手动开始下一轮。`);
+          return;
+        }
         status(`已处理 ${processed}/${c.maxJobs}，已读取详情 ${opened}：${row.title}`);
       }
       await finish(current,`本轮结束：处理 ${processed} 个，读取详情 ${opened} 个。请到候选清单审核。休息后手动启动下一轮。`);

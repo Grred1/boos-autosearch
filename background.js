@@ -1,8 +1,9 @@
-/* 后台只管理本轮详情标签、取消与外部模型请求，无沟通接口。 */
+/* 后台管理低频浏览、逐条审核及绑定到当前职位的一次性发送授权。 */
 'use strict';
-importScripts('src/core.js');
+importScripts('src/core.js','src/review.js');
 const owners = new Map();
 const tasks = new Map();
+const heldDetails = new Map();
 // 后台重启后只清理由扩展登记且仍是对应职位URL的详情标签；不恢复自动运行。
 const ready = (async () => {
   const { detailTabs = {} } = await chrome.storage.session.get('detailTabs');
@@ -18,7 +19,7 @@ function serializeWrite(action) {
   return result;
 }
 async function rememberTabs() {
-  await chrome.storage.session.set({detailTabs:Object.fromEntries([...tasks.values()].map(t => [t.tabId,t.url]))});
+  await chrome.storage.session.set({detailTabs:Object.fromEntries([...tasks.values(),...heldDetails.values()].map(t => [t.tabId,t.url]))});
 }
 const providers = {
   deepseek: { origin: 'https://api.deepseek.com/*', url: 'https://api.deepseek.com/chat/completions' },
@@ -27,7 +28,21 @@ const providers = {
 chrome.action.onClicked.addListener(() => chrome.runtime.openOptionsPage());
 const isJobs = sender => sender.tab && /^https:\/\/www\.zhipin\.com\/web\/geek\/jobs(?:[/?#]|$)/.test(sender.url || '');
 const isOptions = sender => sender.url === chrome.runtime.getURL('options.html');
+const isDetail = sender => sender.tab && !!BossCore.jobURL(sender.url);
+const isChat = sender => sender.tab && /^https:\/\/www\.zhipin\.com\/web\/geek\/chat(?:[/?#]|$)/.test(sender.url || '');
 const readSettings = async () => BossCore.normalizeConfig((await chrome.storage.local.get('settings')).settings);
+async function appendFeedback(event) {
+  if (!event) return;
+  const {feedback=[]} = await chrome.storage.local.get('feedback');
+  feedback.push({...event,id:crypto.randomUUID()});
+  await chrome.storage.local.set({feedback});
+}
+async function heldClose(ownerId) {
+  const held = heldDetails.get(ownerId);
+  if (!held) return;
+  heldDetails.delete(ownerId); await rememberTabs();
+  try { await chrome.tabs.remove(held.tabId); } catch { /* 已关闭 */ }
+}
 async function closeTask(task, error) {
   if (!tasks.has(task.tabId)) return;
   tasks.delete(task.tabId);
@@ -43,6 +58,7 @@ async function cancel(ownerId, reason = '已停止') {
     if (!run.manual) await serializeWrite(() => chrome.storage.local.set({cooldownUntil:Date.now() + run.config.roundRestMinutes * 60000}));
   }
   await Promise.all([...tasks.values()].filter(t => t.ownerId === ownerId).map(t => closeTask(t, reason)));
+  await heldClose(ownerId);
 }
 async function verifyRun(sender, token) {
   const run = owners.get(sender.tab.id);
@@ -62,6 +78,7 @@ async function openDetail(sender, msg) {
   run.opened++;
   run.nextVisit = Date.now() + run.config.intervalSeconds * 1000;
   try {
+    await heldClose(sender.tab.id);
     const tab = await chrome.tabs.create({ url, active: false });
     if (runSignal.aborted) { await chrome.tabs.remove(tab.id); throw new Error('已停止'); }
     return await new Promise((resolve, reject) => {
@@ -112,7 +129,7 @@ async function analyze(sender, msg) {
     if (typeof raw !== 'string') throw new Error('模型响应缺少内容');
     const result = BossCore.validateAnalysis(JSON.parse(raw.replace(/^\s*```(?:json)?\s*/i, '').replace(/\s*```\s*$/, '')));
     if (runSignal.aborted) throw new Error('本轮已停止');
-    return result;
+    return {...result,generation:{promptVersion:BossReview.PROMPT_VERSION,provider:c.provider,model:c.model,at:new Date().toISOString()}};
   } finally { clearTimeout(timer); runSignal.removeEventListener('abort', abort); run.busy = false; }
 }
 async function handle(msg, sender) {
@@ -127,8 +144,11 @@ async function handle(msg, sender) {
     if (msg.error) { await closeTask(task, msg.error); return {}; }
     const data = msg.data;
     if (!data || !data.jd) { await closeTask(task, '未识别到 JD，已停止以便检查'); return {}; }
-    task.resolve(data);
-    await closeTask(task);
+    if (owners.get(task.ownerId)?.config.reviewOnMatch) {
+      tasks.delete(task.tabId);clearTimeout(task.timer);
+      heldDetails.set(task.ownerId,{tabId:task.tabId,url:task.url});await rememberTabs();
+      task.resolve(data);
+    } else { task.resolve(data); await closeTask(task); }
     return {};
   }
   if (msg.type === 'OPEN_OPTIONS' && isJobs(sender)) { await chrome.runtime.openOptionsPage(); return {}; }
@@ -136,6 +156,81 @@ async function handle(msg, sender) {
     if (owners.size) throw new Error('请先停止所有浏览轮次再修改配置');
     await chrome.storage.local.set({ settings: BossCore.normalizeConfig(msg.settings), apiKey: String(msg.apiKey || '').trim() });
     return {};
+  }
+  if (msg.type === 'GET_REVIEW' && isDetail(sender)) {
+    const url=BossCore.jobURL(sender.url),{records={}}=await chrome.storage.local.get('records');
+    const row=records[url];
+    if (!row) return {};
+    return {row,feedbackCount:(await chrome.storage.local.get('feedback')).feedback?.filter(x=>x.url===url).length || 0};
+  }
+  if (msg.type === 'AUTHORIZE_SEND' && isDetail(sender)) return serializeWrite(async()=>{
+    if (owners.size) throw new Error('请先停止浏览，再确认沟通');
+    const {sendIntent}=await chrome.storage.session.get('sendIntent');
+    if (sendIntent && sendIntent.expiresAt > Date.now()) throw new Error('已有沟通操作待完成，请先核对');
+    const url=BossCore.jobURL(sender.url),{records={}}=await chrome.storage.local.get('records');
+    const row=records[url];if (!row) throw new Error('职位记录不存在');
+    const {intent,event}=BossReview.authorize(row,msg,sender.tab.id);
+    await appendFeedback(event);
+    await chrome.storage.local.set({records});
+    await chrome.storage.session.set({sendIntent:intent});
+    return {intent};
+  });
+  if (msg.type === 'GET_SEND_INTENT' && (isDetail(sender) || isChat(sender))) {
+    const {sendIntent:p}=await chrome.storage.session.get('sendIntent');
+    if (!p || p.expiresAt < Date.now() || !['authorized','opening'].includes(p.phase)) return {};
+    const tab=await chrome.tabs.get(sender.tab.id);
+    if (sender.tab.id !== p.sourceTabId && tab.openerTabId !== p.sourceTabId) return {};
+    if (p.executorTabId && p.executorTabId !== sender.tab.id) return {};
+    return {intent:p};
+  }
+  if (msg.type === 'SEND_STEP' && (isDetail(sender) || isChat(sender))) return serializeWrite(async()=>{
+    const {sendIntent:p}=await chrome.storage.session.get('sendIntent');
+    if (!p || p.id !== msg.id || p.expiresAt < Date.now()) throw new Error('发送授权已失效；请在BOSS核对结果，不会重试');
+    const tab=await chrome.tabs.get(sender.tab.id);
+    const same=sender.tab.id===p.sourceTabId;
+    if (!same && tab.openerTabId !== p.sourceTabId) throw new Error('沟通标签不属于本次确认');
+    const {records={},activeReviewURL}=await chrome.storage.local.get(['records','activeReviewURL']);
+    const row=records[p.url];if (!row || row.communication?.id!==p.id || row.greeting!==p.greeting) throw new Error('发送记录或文本已变化');
+    const phase=msg.phase;
+    if (phase==='opening') {
+      if (!same || !isDetail(sender) || BossCore.jobURL(sender.url)!==p.url || p.phase!=='authorized') throw new Error('不能重复点击沟通');
+    } else if (phase==='dispatching') {
+      if (p.phase!=='opening' || !BossReview.identityMatches(p,msg.identity) || (p.executorTabId && p.executorTabId!==sender.tab.id)) throw new Error('聊天对象未核实或已经尝试发送');
+      p.executorTabId=sender.tab.id;
+    } else if (phase==='ui_sent') {
+      if (p.phase!=='dispatching' || p.executorTabId!==sender.tab.id || !BossReview.identityMatches(p,msg.identity)) throw new Error('缺少本次发送证据');
+    } else if (phase==='uncertain') {
+      if(p.executorTabId && p.executorTabId!==sender.tab.id) throw new Error('本次发送正由另一已核实标签处理，请到该标签核对');
+    } else throw new Error('无效发送状态');
+    p.phase=phase;
+    row.communication.state=phase;row.communication.updatedAt=new Date().toISOString();
+    if (phase==='uncertain') row.communication.error=String(msg.error || '请在BOSS核对').slice(0,500);
+    const changes={records};
+    if (phase==='ui_sent' && activeReviewURL===p.url) changes.activeReviewURL=null;
+    await chrome.storage.local.set(changes);
+    await chrome.storage.session.set({sendIntent:['ui_sent','uncertain'].includes(phase)?null:p});
+    return {};
+  });
+  if (msg.type === 'ACK_SEND_RESULT' && isDetail(sender)) return serializeWrite(async()=>{
+    const url=BossCore.jobURL(sender.url),{records={},activeReviewURL}=await chrome.storage.local.get(['records','activeReviewURL']);
+    if(!records[url]?.communication) throw new Error('没有待核对的沟通记录');
+    const {sendIntent}=await chrome.storage.session.get('sendIntent');
+    if(sendIntent?.url===url) await chrome.storage.session.set({sendIntent:null});
+    records[url].communication.manualCheckedAt=new Date().toISOString();
+    await chrome.storage.local.set({records,...(activeReviewURL===url?{activeReviewURL:null}:{})});return {};
+  });
+  if (msg.type === 'SKIP_REVIEW' && isDetail(sender)) return serializeWrite(async()=>{
+    const url=BossCore.jobURL(sender.url),{records={},activeReviewURL}=await chrome.storage.local.get(['records','activeReviewURL']);
+    if (!records[url]) throw new Error('记录不存在');
+    if (records[url].communication) throw new Error('已发起沟通，请先在BOSS核对结果');
+    await appendFeedback({...BossReview.saveEdit(records[url],records[url].greeting || '',msg.note,'skip'),action:'skip'});
+    records[url].reviewState='skipped';
+    await chrome.storage.local.set({records,...(activeReviewURL===url?{activeReviewURL:null}:{})});return {};
+  });
+  if (msg.type === 'OPEN_RECORD_REVIEW' && isOptions(sender)) {
+    const url=BossCore.jobURL(msg.url),{records={}}=await chrome.storage.local.get('records');
+    if (!url || !records[url]) throw new Error('记录不存在');
+    await chrome.tabs.create({url,active:true});return {};
   }
   if (msg.type === 'REANALYZE_RECORD' && isOptions(sender)) {
     const token = crypto.randomUUID();
@@ -149,12 +244,13 @@ async function handle(msg, sender) {
       const url = BossCore.jobURL(msg.url);
       if (!url || !records[url]?.jd) throw new Error('没有已保存的JD，无法重新分析');
       row = {...records[url],company:String(msg.company || records[url].company || '').slice(0,300)};
+      BossReview.editable(row);
       owners.set(ownerId,{token,config,controller:new AbortController(),busy:false,manual:true});
     });
     try {
       const ai = await analyze(sender,{token,job:row});
       Object.assign(row,BossCore.assess(row,config,true));
-      row.analysis = ai; row.greeting = ai.greeting; row.gaps = ai.gaps;
+      row.analysis = ai; row.greeting = ai.greeting; row.generatedGreeting=ai.greeting;row.generation=ai.generation;row.draftRevision=(row.draftRevision || 0)+1; row.gaps = ai.gaps;
       row.reasons.push(...ai.reasons); row.pending.push(...ai.pending);
       if (ai.verdict === 'skip') row.status='skip';
       else if (ai.verdict === 'review' || ai.pending.length || ai.gaps.length) row.status='review';
@@ -169,19 +265,27 @@ async function handle(msg, sender) {
       owners.get(ownerId)?.controller.abort();owners.delete(ownerId);
     }
   }
-  if (msg.type === 'EDIT_RECORD' && isOptions(sender)) return serializeWrite(async () => {
+  if (msg.type === 'EDIT_RECORD' && (isOptions(sender) || isDetail(sender))) return serializeWrite(async () => {
+    if ([...owners.values()].some(run=>run.manual)) throw new Error('请等待重新分析完成再编辑话术');
     if (owners.size && msg.remove) throw new Error('请先停止浏览再移出记录');
     const {records = {}} = await chrome.storage.local.get('records');
-    const url = BossCore.jobURL(msg.url);
+    const url = isDetail(sender) ? BossCore.jobURL(sender.url) : BossCore.jobURL(msg.url);
     if (!url || !records[url]) throw new Error('记录不存在，请刷新');
-    if (msg.remove) delete records[url]; else records[url].greeting = String(msg.greeting || '').slice(0,2000);
+    BossReview.editable(records[url]);
+    if (msg.revision !== undefined && msg.revision !== (records[url].draftRevision || 0)) throw new Error('草稿已被其他页面修改，请重新加载');
+    if (msg.remove) {
+      const {activeReviewURL}=await chrome.storage.local.get('activeReviewURL');
+      if (activeReviewURL===url) throw new Error('此职位正在等待审核，请到JD页选择本条暂不沟通');
+      delete records[url];
+    } else await appendFeedback(BossReview.saveEdit(records[url],msg.greeting,msg.note));
     await chrome.storage.local.set({records}); return {};
   });
   if (!isJobs(sender)) throw new Error('仅允许在职位搜索页手动运行');
   if (msg.type === 'START_RUN') return serializeWrite(async () => {
     if (owners.has(sender.tab.id) || owners.size) throw new Error('已有轮次运行，请先停止或暂停');
     const config = await readSettings();
-    const { cooldownUntil = 0 } = await chrome.storage.local.get('cooldownUntil');
+    const { cooldownUntil = 0,activeReviewURL } = await chrome.storage.local.get(['cooldownUntil','activeReviewURL']);
+    if (activeReviewURL) throw new Error('有职位等待审核，请先在JD页确认沟通或选择本条暂不沟通');
     if (Date.now() < cooldownUntil) throw new Error(`轮次间休息中，可于 ${new Date(cooldownUntil).toLocaleTimeString()} 手动开始`);
     const token = crypto.randomUUID();
     owners.set(sender.tab.id, { token, config, opened: 0, nextVisit: 0, controller: new AbortController(), busy: false });
@@ -197,8 +301,22 @@ async function handle(msg, sender) {
       const url = BossCore.jobURL(msg.row?.url);
       if (!url) throw new Error('无效的职位记录');
       const {records = {}} = await chrome.storage.local.get('records');
+      if (records[url]?.communication) throw new Error('已沟通记录不可被浏览流程覆盖');
       records[url] = msg.row; await chrome.storage.local.set({records}); return {};
     });
+  }
+  if (msg.type === 'PRESENT_REVIEW') {
+    await verifyRun(sender,msg.token);
+    const held=heldDetails.get(sender.tab.id),url=BossCore.jobURL(msg.url);
+    const {records={}}=await chrome.storage.local.get('records');
+    if (!held || held.url!==url || !records[url]?.jd || records[url].status==='skip') throw new Error('没有可审核的详情页面');
+    const tab=await chrome.tabs.get(held.tabId);
+    if (BossCore.jobURL(tab.url)!==url) throw new Error('详情页面已变化');
+    records[url].reviewState='awaiting';
+    await chrome.storage.local.set({records,activeReviewURL:url});
+    heldDetails.delete(sender.tab.id);await rememberTabs();await cancel(sender.tab.id);
+    await chrome.tabs.update(held.tabId,{active:true});
+    await chrome.tabs.sendMessage(held.tabId,{type:'SHOW_REVIEW'}).catch(()=>{});return {};
   }
   if (msg.type === 'PAUSE_RUN') {
     const run = await verifyRun(sender,msg.token);

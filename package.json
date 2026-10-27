@@ -1,10 +1,10 @@
 {
   "name": "campus-job-assistant",
-  "version": "2.1.0",
+  "version": "2.2.0",
   "private": true,
   "scripts": {
     "test": "node --test tests/*.test.js",
-    "check": "node --check background.js && node --check content.js && node --check options.js && node --check src/core.js && node --check src/dom.js && node --check src/resume.js",
+    "check": "node --check background.js && node --check content.js && node --check options.js && node --check src/core.js && node --check src/dom.js && node --check src/resume.js && node --check src/review.js && node --check src/chat-dom.js && node --check review-content.js",
     "test:browser": "node tests/browser.cjs"
   },
   "devDependencies": {

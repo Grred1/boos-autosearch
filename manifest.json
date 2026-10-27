@@ -1,8 +1,8 @@
 {
   "manifest_version": 3,
   "name": "秋招职位筛选助手",
-  "version": "2.1.0",
-  "description": "手动启动低频职位浏览、薪资与校招筛选、简历匹配和话术草稿，由本人发送。",
+  "version": "2.2.0",
+  "description": "手动启动低频职位浏览、薪资与校招筛选、简历匹配和话术草稿，逐条审核后发送。",
   "permissions": ["storage"],
   "host_permissions": ["https://www.zhipin.com/*"],
   "optional_host_permissions": ["https://api.deepseek.com/*", "https://api.openai.com/*"],
@@ -10,8 +10,8 @@
   "action": {"default_title": "打开配置与候选清单"},
   "options_page": "options.html",
   "content_scripts": [{
-    "matches": ["https://www.zhipin.com/web/geek/jobs*", "https://www.zhipin.com/job_detail/*"],
-    "js": ["src/core.js", "src/dom.js", "content.js"],
+    "matches": ["https://www.zhipin.com/web/geek/jobs*", "https://www.zhipin.com/job_detail/*", "https://www.zhipin.com/web/geek/chat*"],
+    "js": ["src/core.js", "src/dom.js", "src/review.js", "src/chat-dom.js", "review-content.js", "content.js"],
     "run_at": "document_idle"
   }],
   "icons": {"16":"icons/icon16.png", "48":"icons/icon48.png", "128":"icons/icon128.png"}
