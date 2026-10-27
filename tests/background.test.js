@@ -6,8 +6,8 @@ const fs = require('node:fs');
 const C = require('../src/core');
 const R = require('../src/review');
 const tick = () => new Promise(resolve=>setImmediate(resolve));
-function setup(settings={}) {
-  const local={settings:C.normalizeConfig({reviewOnMatch:false,...settings})},session={},listeners={},removed=[],created=[];
+function setup(settings={},initialSession={}) {
+  const local={settings:C.normalizeConfig({reviewOnMatch:false,...settings})},session=structuredClone(initialSession),listeners={},removed=[],created=[];
   let nextId=20, onMessage;
   const store = data => ({
     async get(keys) {if(typeof keys==='string')return {[keys]:structuredClone(data[keys])};return Object.fromEntries(keys.map(k=>[k,structuredClone(data[k])]));},
@@ -200,4 +200,27 @@ test('后台拒绝旧版补发授权及没有空会话证据的首次发送',asy
  delete h.session.sendIntent.mode;
  assert.equal((await h.send({type:'GET_SEND_INTENT'},detailSender)).data.intent,undefined);
  assert.equal((await h.send({type:'SEND_STEP',id,phase:'dispatching',firstMessageState:'empty',identity:{url:jobURL,recruiter:'陈女士'}},detailSender)).ok,false);
+});
+test('自动续找休息由后台强制执行、保持单浏览者，最多六轮且停止后不恢复',async()=>{
+ const h=setup({autoContinue:true,roundRestMinutes:5});const {data}=await h.send({type:'START_RUN'});
+ let current=Date.now();h.sandbox.Date=class extends Date{static now(){return current;}};
+ for(let round=1;round<6;round++){
+  const rest=await h.send({type:'REST_RUN',token:data.token});assert.equal(rest.ok,true);
+  assert.equal((await h.send({type:'START_RUN'},{tab:{id:2},url:h.owner.url})).ok,false);
+  assert.equal((await h.send({type:'NEXT_ROUND',token:data.token})).ok,false);
+  assert.equal((await h.send({type:'READ_DETAIL',token:data.token,url:jobURL})).ok,false);
+  current=rest.data.until;assert.equal((await h.send({type:'NEXT_ROUND',token:data.token})).data.round,round+1);
+ }
+ assert.equal((await h.send({type:'REST_RUN',token:data.token})).ok,false);
+ await h.send({type:'CANCEL_RUN',token:data.token});assert.equal((await h.send({type:'NEXT_ROUND',token:data.token})).ok,false);
+});
+test('后台因空闲重启可恢复同一搜索标签的休息和轮次，不能缩短冷却或重置计数',async()=>{
+ const h=setup({autoContinue:true,roundRestMinutes:5});const {data}=await h.send({type:'START_RUN'});
+ const rest=await h.send({type:'REST_RUN',token:data.token});
+ const next=setup({autoContinue:true,roundRestMinutes:5},h.session);next.created.push({id:1,url:next.owner.url});
+ assert.equal((await next.send({type:'PING',token:data.token})).ok,true);
+ assert.equal((await next.send({type:'NEXT_ROUND',token:data.token})).ok,false);
+ const future=rest.data.until;next.sandbox.Date=class extends Date {static now(){return future;}};
+ assert.equal((await next.send({type:'NEXT_ROUND',token:data.token})).data.round,2);
+ assert.equal(next.session.restingSearch,null);await next.send({type:'CANCEL_RUN',token:data.token});
 });

@@ -47,7 +47,7 @@ const path = require('node:path');
     const db={records:{}};window.__db=db;window.__calls=[];let detailReject;
     window.chrome={storage:{local:{get:async key=>({[key]:structuredClone(db[key])}),set:async values=>Object.assign(db,values)}},runtime:{sendMessage:async msg=>{
       window.__calls.push(msg.type);
-      if(msg.type==='START_RUN')return {ok:true,data:{token:'test',config:BossCore.normalizeConfig({maxJobs:2,graduationYear:'2027',salaryMin:25,intervalSeconds:30,reviewOnMatch:false})}};
+      if(msg.type==='START_RUN')return {ok:true,data:{token:'test',config:BossCore.normalizeConfig({maxJobs:2,graduationYear:'2027',salaryMin:25,intervalSeconds:30,reviewOnMatch:false,autoContinue:false})}};
       if(msg.type==='READ_DETAIL')return new Promise((resolve,reject)=>{detailReject=reject;window.__finishDetail=()=>resolve({ok:true,data:{jd:'2027届校招，开发Agent工具调用'}});});
       if(msg.type==='SAVE_RECORD'){db.records[msg.row.url]=msg.row;return {ok:true};}
       if(msg.type==='PAUSE_RUN'||msg.type==='CANCEL_RUN'){if(detailReject){detailReject(new Error(msg.type==='PAUSE_RUN'?'已暂停':'已停止'));detailReject=null;}return {ok:true};}
@@ -55,7 +55,7 @@ const path = require('node:path');
     }}};
   });
   await jobs.addScriptTag({path:'src/core.js'});await jobs.addScriptTag({path:'src/dom.js'});await jobs.addScriptTag({path:'content.js'});
-  await jobs.getByRole('button',{name:'开始一轮'}).click();
+  await jobs.getByRole('button',{name:'开始自动找职位'}).click();
   await jobs.waitForFunction(()=>window.__calls.includes('READ_DETAIL'));
   await jobs.getByRole('button',{name:'暂停',exact:true}).click();await jobs.getByText(/已暂停。当前请求已取消/).waitFor();
   assert.equal(await jobs.evaluate(()=>window.__calls.filter(x=>x==='READ_DETAIL').length),1);
@@ -68,7 +68,7 @@ const path = require('node:path');
   assert.ok(await jobs.evaluate(()=>Object.values(window.__db.records).some(r=>r.stage==='暂停时中断')));
   console.log('PASS 真实按钮触发浏览、暂停取消、继续遵守间隔、停止后不再访问');
   // 运行中出现安全提示，MutationObserver立即停止。
-  await jobs.getByRole('button',{name:'开始一轮'}).click();
+  await jobs.getByRole('button',{name:'开始自动找职位'}).click();
   await jobs.waitForFunction(()=>window.__calls.filter(x=>x==='READ_DETAIL').length===3);
   await jobs.evaluate(()=>{const d=document.createElement('div');d.className='dialog';d.textContent='访问过于频繁，请完成验证';document.body.append(d);});
   await jobs.getByText(/已停止：检测到访问限制/).waitFor();

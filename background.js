@@ -4,13 +4,22 @@ importScripts('src/core.js','src/review.js');
 const owners = new Map();
 const tasks = new Map();
 const heldDetails = new Map();
-// 后台重启后只清理由扩展登记且仍是对应职位URL的详情标签；不恢复自动运行。
+// 浏览中的请求不重放；只恢复仍由当前搜索标签持有的休息状态，不恢复发送。
 const ready = (async () => {
-  const { detailTabs = {} } = await chrome.storage.session.get('detailTabs');
+  const { detailTabs = {},restingSearch } = await chrome.storage.session.get(['detailTabs','restingSearch']);
   for (const [id, url] of Object.entries(detailTabs)) {
     try { const tab = await chrome.tabs.get(Number(id)); if (BossCore.jobURL(tab.url) === url) await chrome.tabs.remove(Number(id)); } catch { /* 已关闭 */ }
   }
   await chrome.storage.session.set({detailTabs:{}});
+  if(restingSearch && restingSearch.expiresAt>Date.now()) {
+    try {
+      const tab=await chrome.tabs.get(restingSearch.ownerId);
+      if(/^https:\/\/www\.zhipin\.com\/web\/geek\/jobs(?:[/?#]|$)/.test(tab.url || '')) {
+        const config=BossCore.normalizeConfig((await chrome.storage.local.get('settings')).settings);
+        if(config.autoContinue) owners.set(restingSearch.ownerId,{...restingSearch,config,phase:'resting',busy:false,opened:0,nextVisit:0,controller:new AbortController()});
+      }
+    } catch { /* 搜索标签已关闭，不恢复 */ }
+  }
 })();
 let writeQueue = Promise.resolve();
 function serializeWrite(action) {
@@ -52,6 +61,8 @@ async function closeTask(task, error) {
   try { await chrome.tabs.remove(task.tabId); } catch { /* 标签可能已由使用者关闭 */ }
 }
 async function cancel(ownerId, reason = '已停止') {
+  const {restingSearch}=await chrome.storage.session.get('restingSearch');
+  if(restingSearch?.ownerId===ownerId) await chrome.storage.session.set({restingSearch:null});
   const run = owners.get(ownerId);
   if (run) {
     run.controller.abort(); owners.delete(ownerId);
@@ -69,6 +80,7 @@ async function openDetail(sender, msg) {
   const run = await verifyRun(sender, msg.token);
   const runSignal = run.controller.signal;
   if (run.paused) throw new Error('本轮已暂停');
+  if (run.phase==='resting') throw new Error('正在轮次间休息，不能读取新JD');
   if (run.busy) throw new Error('本轮已有操作执行中');
   const url = BossCore.jobURL(msg.url);
   if (!url) throw new Error('无效的职位详情链接');
@@ -289,12 +301,27 @@ async function handle(msg, sender) {
     if (activeReviewURL) throw new Error('有职位等待审核，请先在JD页确认沟通或选择本条暂不沟通');
     if (Date.now() < cooldownUntil) throw new Error(`轮次间休息中，可于 ${new Date(cooldownUntil).toLocaleTimeString()} 手动开始`);
     const token = crypto.randomUUID();
-    owners.set(sender.tab.id, { token, config, opened: 0, nextVisit: 0, controller: new AbortController(), busy: false });
+    owners.set(sender.tab.id, { token, config, opened: 0, nextVisit: 0, controller: new AbortController(), busy: false,phase:'browsing',round:1 });
     await chrome.storage.local.set({ cooldownUntil: Date.now() + config.roundRestMinutes * 60000 });
     const {resume, ...publicConfig} = config;
     return { token, config: publicConfig };
   });
   if (msg.type === 'PING') { await verifyRun(sender,msg.token); return {}; }
+  if (msg.type === 'REST_RUN') {
+    const run=await verifyRun(sender,msg.token);
+    if(!run.config.autoContinue || run.round>=6 || run.phase!=='browsing' || run.busy || run.paused) throw new Error('不能继续自动查找');
+    run.phase='resting';run.restUntil=Date.now()+run.config.roundRestMinutes*60000;
+    await heldClose(sender.tab.id);
+    await chrome.storage.session.set({restingSearch:{ownerId:sender.tab.id,token:run.token,round:run.round,restUntil:run.restUntil,paused:false,expiresAt:run.restUntil+30*60000}});
+    await serializeWrite(()=>chrome.storage.local.set({cooldownUntil:run.restUntil}));
+    return {until:run.restUntil};
+  }
+  if (msg.type === 'NEXT_ROUND') {
+    const run=await verifyRun(sender,msg.token);
+    if(run.phase!=='resting' || run.paused || run.round>=6 || Date.now()<run.restUntil) throw new Error('休息尚未结束或达到轮次上限');
+    await chrome.storage.session.set({restingSearch:null});
+    run.round++;run.opened=0;run.nextVisit=0;run.phase='browsing';return {round:run.round};
+  }
   if (msg.type === 'SAVE_RECORD') {
     await verifyRun(sender,msg.token);
     return serializeWrite(async () => {
@@ -322,13 +349,16 @@ async function handle(msg, sender) {
   if (msg.type === 'PAUSE_RUN') {
     const run = await verifyRun(sender,msg.token);
     run.paused = true; run.controller.abort();
+    if(run.phase==='resting') {const {restingSearch}=await chrome.storage.session.get('restingSearch');if(restingSearch)await chrome.storage.session.set({restingSearch:{...restingSearch,paused:true}});}
     await Promise.all([...tasks.values()].filter(t => t.ownerId === sender.tab.id).map(t => closeTask(t,'已暂停')));
     return {};
   }
   if (msg.type === 'RESUME_RUN') {
     const run = owners.get(sender.tab.id);
     if (!run || run.token !== msg.token || !run.paused) throw new Error('暂停状态已失效，请停止后重新开始');
-    run.controller = new AbortController(); run.paused = false; return {};
+    run.controller = new AbortController(); run.paused = false;
+    if(run.phase==='resting') {const {restingSearch}=await chrome.storage.session.get('restingSearch');if(restingSearch)await chrome.storage.session.set({restingSearch:{...restingSearch,paused:false}});}
+    return {};
   }
   if (msg.type === 'CANCEL_RUN') {
     await verifyRun(sender, msg.token);

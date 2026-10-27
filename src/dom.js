@@ -1,8 +1,15 @@
 /* DOM选择器沿用上游职位读取思路，无沟通按钮选择器。 */
 (function () {
   'use strict';
-  const pick = (root, selectors) => selectors.map(s => root.querySelector(s)).find(Boolean);
-  const text = (root, selectors) => pick(root, selectors)?.textContent?.trim() || '';
+  const text = (root, selectors) => {
+    for(const selector of selectors) {
+      const nodes=[...(root.querySelectorAll?.(selector) || [])];
+      if(!nodes.length) {const node=root.querySelector(selector);if(node)nodes.push(node);}
+      const value=nodes.map(node=>node.textContent?.trim()).find(Boolean);
+      if(value)return value;
+    }
+    return '';
+  };
   const visible = el => !!el && el.getClientRects().length > 0 && getComputedStyle(el).visibility !== 'hidden';
   const names = ['.job-name','.job-title','[class*=job-name]'];
   const companies = ['.company-name','[class*=company-name]','.company-info a'];
@@ -45,12 +52,22 @@
     const rows = unique.filter(el => !unique.some(other => other !== el && other.contains(el))).map(el => {
       const link = [...el.querySelectorAll('a[href]')].find(a => BossCore.jobURL(a.href));
       const url = link && BossCore.jobURL(link.href);
-      return url ? {url,title:text(el,names) || link.textContent.trim(),company:text(el,[...companies,'[class*=company] a','[class*=brand]']),salary:text(el,salary),city:text(el,city),tags:text(el,['.tag-list','.job-info','.job-card-footer','ul'])} : null;
+      return url ? {url,title:text(el,names) || link.textContent.trim(),company:text(el,[...companies,'[class*=company] a','[class*=brand]','a[href*="/gongsi/"]']),salary:text(el,salary),city:text(el,city),tags:text(el,['.tag-list','.job-info','.job-card-footer','ul'])} : null;
     }).filter(Boolean);
     return [...new Map(rows.map(row=>[row.url,row])).values()];
   }
   function detail(doc = document) {
-    return {title:text(doc,['.job-banner .name h1','.job-name','h1']),company:text(doc,['.job-company-info .company-name','.sider-company .company-name','.job-company .company-name']),salary:text(doc,salary),city:text(doc,['.job-banner .text-city',...city]),tags:text(doc,['.job-banner .text-desc','.job-banner .info-primary p']),jd:text(doc,['.job-sec-text','.job-detail-section .text','.job-sec .text','.job-detail .text']).slice(0,16000)};
+    const metadata=[...(doc.querySelectorAll?.('.job-sec,.job-detail-section') || [])].flatMap(section=>{
+      const content=section.innerText || section.textContent || '';
+      return [...content.matchAll(/毕业(?:时间|年份)\s*[:：]\s*20\d{2}\s*年?(?:\s*[-–—~至到]\s*20\d{2}\s*年?)?|招聘截止日期\s*[:：]\s*20\d{2}[.\-/年]\d{1,2}[.\-/月]\d{1,2}日?/g)].map(match=>match[0]);
+    });
+    const jd=[...new Set(metadata),text(doc,['.job-sec-text','.job-detail-section .text','.job-sec .text','.job-detail .text'])].filter(Boolean).join('\n');
+    return {title:text(doc,['.job-banner .name h1','.job-name','h1']),company:text(doc,['.job-company-info .company-name','.sider-company .company-name','.job-company .company-name','.sider-company .company-info a[href*="/gongsi/"]']),salary:text(doc,salary),city:text(doc,['.job-banner .text-city',...city]),tags:text(doc,['.job-banner .text-desc','.job-banner .info-primary p']),jd:jd.slice(0,16000)};
   }
-  globalThis.BossDOM = {risk,cards,detail};
+  function scrollList(doc=document) {
+    const container=[...doc.querySelectorAll('.job-list-container,.job-list-box,.job-list,.rec-job-list')].find(el=>visible(el) && el.scrollHeight>el.clientHeight+10 && /auto|scroll/.test(getComputedStyle(el).overflowY));
+    const distance=Math.round((container?.clientHeight || window.innerHeight)*0.75);
+    (container || window).scrollBy({top:distance,behavior:'smooth'});
+  }
+  globalThis.BossDOM = {risk,cards,detail,scrollList};
 })();

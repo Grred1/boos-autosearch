@@ -61,3 +61,14 @@ test('招聘方邀请候选人的错误口吻被拒绝',()=>{
  assert.throws(()=>C.validateAnalysis({verdict:'match',reasons:[],gaps:[],pending:[],greeting:'郭同学你好，看到你在开发Agent，欢迎加入我们团队。'}),/招聘方/);
  assert.match(C.validateAnalysis({verdict:'match',reasons:[],gaps:[],pending:[],greeting:'您好，我参与过Agent工具调用系统开发，希望进一步沟通。'}).greeting,/您好，我/);
 });
+test('毕业时间标签的年份范围会用于资格核对，范围内与范围外分别处理',()=>{
+ assert.equal(C.eligibility('在校/应届 毕业时间：2025年-2026年','2027').status,'skip');
+ assert.equal(C.eligibility('在校/应届 毕业时间：2025年-2027年','2026').status,'pass');
+ assert.equal(C.eligibility('在校/应届 毕业时间：2027年','2027').status,'pass');
+});
+test('自动发现先看目标届别与校招，实习日薪可在列表直接排除且仍可关闭全职限制',()=>{
+ const jobs=[{title:'Agent工程师',salary:'30-40K'},{title:'2027校招Agent工程师',salary:'面议'},{title:'2027 Agent实习生',salary:'500元/天'}];
+ const ordered=C.discoveryOrder(jobs,{graduationYear:'2027',salaryMin:25});assert.equal(ordered[0].title,'2027校招Agent工程师');
+ assert.equal(C.assess(jobs[2],{salaryMin:25,fullTimeOnly:true}).status,'skip');
+ assert.equal(C.assess(jobs[2],{salaryMin:25,fullTimeOnly:false}).status,'review');
+});

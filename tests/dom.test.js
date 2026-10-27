@@ -35,3 +35,14 @@ test('详情的全局推荐公司不作为目标公司的回退',()=>{
  const context={document:doc};vm.runInNewContext(fs.readFileSync('src/dom.js','utf8'),context);
  assert.equal(context.BossDOM.detail().company,'');assert.equal(context.BossDOM.detail().jd,'目标JD');
 });
+test('独立显示在正文外的毕业范围与截止日期会进入JD，避免漏筛校招资格',()=>{
+ const doc={querySelector:s=>s==='.job-sec-text'?{textContent:'负责Agent多智能体调度'}:null,querySelectorAll:s=>s==='.job-sec,.job-detail-section'?[{textContent:'毕业时间：2025年-2026年 招聘截止日期：2026.12.27'}]:[]};
+ const context={document:doc};vm.runInNewContext(fs.readFileSync('src/dom.js','utf8'),context);
+ const jd=context.BossDOM.detail().jd;assert.match(jd,/毕业时间：2025年-2026年/);assert.match(jd,/招聘截止日期：2026.12.27/);assert.match(jd,/负责Agent/);
+ assert.equal(require('../src/core').eligibility(jd+'在校/应届','2027').status,'skip');
+});
+test('公司选择器遇到空图标链接时继续寻找有名称的链接',()=>{
+ const doc={querySelector:()=>null,querySelectorAll:s=>s==='.sider-company .company-info a[href*="/gongsi/"]'?[{textContent:''},{textContent:'示例公司'}]:[]};
+ const context={document:doc};vm.runInNewContext(fs.readFileSync('src/dom.js','utf8'),context);
+ assert.equal(context.BossDOM.detail().company,'示例公司');
+});

@@ -3,7 +3,7 @@ const form = document.getElementById('settings');
 const $ = id => document.getElementById(id);
 let config = {...BossCore.defaults};
 const numberFields = ['salaryMin','maxJobs','intervalSeconds','roundRestMinutes'];
-const boolFields = ['aiEnabled','consent','redactResume','reviewOnMatch'];
+const boolFields = ['aiEnabled','consent','redactResume','reviewOnMatch','autoContinue','fullTimeOnly'];
 const labels = {candidate:'候选',review:'待确认',skip:'已跳过'};
 const providerOrigins = {deepseek:'https://api.deepseek.com/*',openai:'https://api.openai.com/*'};
 function say(message, error = false) { $('save-status').textContent = message; $('save-status').className = error ? 'error':'success'; }

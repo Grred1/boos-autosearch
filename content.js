@@ -37,7 +37,7 @@
   // 所有职位与模型文本均通过textContent写入，不执行HTML。
   shadow.innerHTML = `<style>
     :host{all:initial}*{box-sizing:border-box}section{position:fixed;right:20px;bottom:24px;width:330px;background:#fff;color:#172d38;border:1px solid #b8cbd1;border-radius:16px;padding:18px;box-shadow:0 8px 32px #17374826;font:14px/1.6 system-ui;z-index:2147483647}h2{font-size:17px;margin:0 0 8px}p{margin:8px 0}button{border:1px solid #abc1c7;border-radius:7px;background:#f3f7f8;padding:7px 10px;cursor:pointer;margin:3px}button:first-of-type{background:#087d72;color:white}button:disabled{opacity:.45;cursor:default}.note{font-size:12px;color:#536a73}#status{white-space:pre-wrap;max-height:130px;overflow:auto}</style>
-    <section><h2>秋招职位筛选助手</h2><p class="note">低频浏览，命中后停在JD等待本人审核；只在你逐条确认后执行沟通。低频仍有账号风险。</p><p id="status" role="status" aria-live="polite">先配置条件和简历，再手动开始。</p><button id="start">开始一轮</button><button id="pause" disabled>暂停</button><button id="stop" disabled>停止</button><button id="options">配置与候选清单</button><p class="note">数量、详情间隔和轮次休息按已保存配置执行。审核结束后需手动开始下一轮。</p></section>`;
+    <section><h2>秋招职位筛选助手</h2><p class="note">低频浏览，命中后停在JD等待本人审核；只在你逐条确认后执行沟通。低频仍有账号风险。</p><p id="status" role="status" aria-live="polite">先配置条件和简历，再手动开始。</p><button id="start">开始自动找职位</button><button id="pause" disabled>暂停</button><button id="stop" disabled>停止</button><button id="options">配置与候选清单</button><p class="note">脚本自动筛选和浏览；未命中时按配置休息后继续，最多6轮。命中后停在JD等待审核。</p></section>`;
   document.body.appendChild(host);
   const $ = id => shadow.getElementById(id);
   let run = null, starting = false, paused = false;
@@ -55,16 +55,16 @@
     if (paused) { await new Promise(resolve => { resumePause = resolve; }); return checkpoint(current); }
   }
   async function wait(ms, current) {
-    let remaining = ms;
-    while (remaining > 0) {
+    const deadline=Date.now()+ms;
+    while (Date.now()<deadline) {
       await checkpoint(current);
-      const step = Math.min(250, remaining);
+      const step = Math.min(250,Math.max(0,deadline-Date.now()));
       await new Promise(resolve => {
         const done = () => { clearTimeout(timer); current.controller.signal.removeEventListener('abort',done); resolve(); };
         const timer = setTimeout(done,step);
         current.controller.signal.addEventListener('abort',done,{once:true});
       });
-      remaining -= step;
+
     }
     await checkpoint(current);
   }
@@ -81,30 +81,33 @@
   }
   async function browse(current) {
     const {config:c} = current;
-    let processed = 0, opened = 0, scrolls = 0, lastVisit = 0;
+    let totalProcessed=0,totalOpened=0;
     try {
-      while (processed < c.maxJobs) {
+      for(let round=1;round<=6;round++) {
+      let processed=0,opened=0,scrolls=0,lastVisit=0,noMore=false;
+      while (opened < c.maxJobs && processed < 100) {
         await checkpoint(current);
         const {records = {}} = await chrome.storage.local.get('records');
         await checkpoint(current);
-        const job = BossDOM.cards().find(j => !records[j.url]);
+        const visibleJobs=BossDOM.cards();
+        const job = BossCore.discoveryOrder(visibleJobs,c).find(j=>!records[j.url]);
         if (!job) {
-          if (scrolls >= 2) { status('没有更多未浏览职位，本轮结束'); break; }
+          if (scrolls >= 2) { noMore=true;status('没有更多未浏览职位，结束搜索'); break; }
           status('当前列表无新职位，等待后向下浏览一次');
           await wait(c.intervalSeconds * 1000,current);
-          window.scrollBy({top:Math.round(window.innerHeight * 0.75),behavior:'smooth'});
+          if(BossDOM.scrollList) BossDOM.scrollList();else window.scrollBy({top:Math.round(window.innerHeight * 0.75),behavior:'smooth'});
           scrolls++;
           await wait(2500,current); continue;
         }
         scrolls = 0;
-        processed++;
+        processed++;totalProcessed++;
         const row = {...job,...BossCore.assess(job,c),updatedAt:new Date().toISOString(),aiStatus:'未启用',greeting:'',stage:'列表初筛'};
         if (row.status === 'skip') {
-          await persist(row,current); status(`已处理 ${processed}/${c.maxJobs}：跳过 ${job.title}`); continue;
+          await persist(row,current); status(`第${round}轮，列表已筛${processed}条：跳过 ${job.title}`); continue;
         }
         if (lastVisit) await wait(Math.max(0,c.intervalSeconds * 1000 - (Date.now() - lastVisit)),current);
         await checkpoint(current);
-        status(`已处理 ${processed}/${c.maxJobs}，读取详情：${job.title}`);
+        status(`第${round}轮，读取详情${opened+1}/${c.maxJobs}：${job.title}`);
         lastVisit = Date.now();
         let detail;
         try { detail = await request({type:'READ_DETAIL',token:current.token,url:job.url}); }
@@ -115,13 +118,14 @@
           if (paused) { await checkpoint(current); continue; }
           throw error;
         }
-        await checkpoint(current); opened++;
+        await checkpoint(current); opened++;totalOpened++;
         for (const key of ['title','salary','jd']) if (detail[key]) row[key] = detail[key];
         if (!row.company && detail.company) row.company = detail.company;
         if (!row.city && detail.city) row.city = detail.city;
         row.tags = [row.tags,detail.tags].filter(Boolean).join('\n');
         Object.assign(row,BossCore.assess(row,c,true),{stage:'已浏览'});
-        if (row.status !== 'skip' && c.aiEnabled) {
+        const pay=BossCore.salaryCheck(row.salaryInfo,c.salaryMin);
+        if (row.status !== 'skip' && pay.status==='pass' && c.aiEnabled) {
           status(`生成匹配分析与话术：${row.title}`);
           try {
             const ai = await request({type:'ANALYZE',token:current.token,job:row});
@@ -135,16 +139,22 @@
             row.aiStatus = `失败：${error.message}`; row.status = 'review'; row.greeting = '';
             row.pending.push('模型调用失败，未生成兜底话术');
           }
-        } else if (row.status !== 'skip') { row.status = 'review'; row.pending.push('尚未进行AI简历匹配，请人工核对'); }
+        } else if (row.status !== 'skip') { row.status = 'review'; row.pending.push(pay.status!=='pass'?'薪资尚未明确达标，保存待确认并继续查找':'尚未进行AI简历匹配，请人工核对'); }
         await checkpoint(current); await persist(row,current);
-        if(c.reviewOnMatch && row.status!=='skip') {
+        if(c.reviewOnMatch && row.status!=='skip' && pay.status==='pass') {
           await request({type:'PRESENT_REVIEW',token:current.token,url:row.url});
           await finish(current,`已停在JD等待审核：${row.title}。确认或暂不沟通后，再手动开始下一轮。`);
           return;
         }
-        status(`已处理 ${processed}/${c.maxJobs}，已读取详情 ${opened}：${row.title}`);
+        status(`第${round}轮，列表已筛${processed}条，已读取详情${opened}/${c.maxJobs}：${row.title}`);
       }
-      await finish(current,`本轮结束：处理 ${processed} 个，读取详情 ${opened} 个。请到候选清单审核。休息后手动启动下一轮。`);
+      if(!c.autoContinue || round===6 || noMore) break;
+      const {until}=await request({type:'REST_RUN',token:current.token});
+      status(`第${round}轮未找到明确达标候选，休息至${new Date(until).toLocaleTimeString()}后自动继续。可随时暂停或停止。`);
+      await wait(Math.max(0,until-Date.now()),current);
+      await request({type:'NEXT_ROUND',token:current.token});
+      }
+      await finish(current,`搜索结束：列表筛选${totalProcessed}条，读取详情${totalOpened}条。未找到明确达标候选，待确认记录已保存在本机。`);
     } catch (error) {
       if (run === current) await finish(current,`已停止：${error.message}`);
     }
