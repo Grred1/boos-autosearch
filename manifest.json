@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "秋招职位筛选助手",
-  "version": "2.2.0",
+  "version": "2.2.1",
   "description": "手动启动低频职位浏览、薪资与校招筛选、简历匹配和话术草稿，逐条审核后发送。",
   "permissions": ["storage"],
   "host_permissions": ["https://www.zhipin.com/*"],

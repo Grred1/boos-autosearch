@@ -136,7 +136,7 @@ test('缓存JD重新分析无需访问BOSS，应用新条件与公司修正且�
 const jobURL='https://www.zhipin.com/job_detail/review.html';
 const detailSender={tab:{id:8},url:jobURL};
 function reviewSetup(){const h=setup();h.local.records={[jobURL]:{url:jobURL,title:'Agent工程师',company:'示例公司',salary:'25-35K',jd:'2027届校招',status:'candidate',greeting:'您好，我参与过Agent工具调用开发，希望进一步沟通。',generation:{promptVersion:R.PROMPT_VERSION,model:'test'}}};return h;}
-async function approve(h){const row=h.local.records[jobURL];return h.send({type:'AUTHORIZE_SEND',greeting:row.greeting,revision:row.draftRevision || 0,acknowledged:true,recruiter:'陈女士'},detailSender);}
+async function approve(h){const row=h.local.records[jobURL];return h.send({type:'AUTHORIZE_SEND',greeting:row.greeting,revision:row.draftRevision || 0,acknowledged:true,autoGreetingOff:true,recruiter:'陈女士'},detailSender);}
 test('审核模式复用原JD标签，不重复访问，展示后停止浏览并阻止下一轮',async()=>{
  const h=setup({reviewOnMatch:true});const {data}=await h.send({type:'START_RUN'});
  const read=h.send({type:'READ_DETAIL',token:data.token,url:jobURL});await tick();
@@ -150,16 +150,16 @@ test('审核模式复用原JD标签，不重复访问，展示后停止浏览并
 });
 test('发送授权只给当前JD，陈旧话术及未确认拒绝，确认同时留下本地记录',async()=>{
  const h=reviewSetup();const row=h.local.records[jobURL];
- assert.equal((await h.send({type:'AUTHORIZE_SEND',greeting:row.greeting,revision:0,acknowledged:true,recruiter:'陈女士'})).ok,false);
- assert.equal((await h.send({type:'AUTHORIZE_SEND',greeting:row.greeting,revision:0,acknowledged:false,recruiter:'陈女士'},detailSender)).ok,false);
- assert.equal((await h.send({type:'AUTHORIZE_SEND',greeting:'其他文本',revision:0,acknowledged:true,recruiter:'陈女士'},detailSender)).ok,false);
+ assert.equal((await h.send({type:'AUTHORIZE_SEND',greeting:row.greeting,revision:0,acknowledged:true,autoGreetingOff:true,recruiter:'陈女士'})).ok,false);
+ assert.equal((await h.send({type:'AUTHORIZE_SEND',greeting:row.greeting,revision:0,acknowledged:false,autoGreetingOff:true,recruiter:'陈女士'},detailSender)).ok,false);
+ assert.equal((await h.send({type:'AUTHORIZE_SEND',greeting:'其他文本',revision:0,acknowledged:true,autoGreetingOff:true,recruiter:'陈女士'},detailSender)).ok,false);
  const r=await approve(h);assert.equal(r.ok,true);assert.equal(h.local.feedback.length,1);assert.equal(h.local.feedback[0].action,'confirm');
  assert.equal((await approve(h)).ok,false);
  assert.equal((await h.send({type:'EDIT_RECORD',url:jobURL,greeting:'偷偷改稿'},{url:'chrome-extension://test/options.html'})).ok,false);
 });
 test('只对绑定会话授权一次发送，错误对象、新标签和重复点击均拒绝',async()=>{
  const h=reviewSetup(),{data}=await approve(h),id=data.intent.id;
- const step=(phase,sender=detailSender,identity={url:jobURL,recruiter:'陈女士'})=>h.send({type:'SEND_STEP',id,phase,identity},sender);
+ const step=(phase,sender=detailSender,identity={url:jobURL,recruiter:'陈女士'})=>h.send({type:'SEND_STEP',id,phase,identity,firstMessageState:'empty'},sender);
  assert.equal((await step('ui_sent')).ok,false);assert.equal((await step('opening')).ok,true);assert.equal((await step('opening')).ok,false);
  const unrelated={tab:{id:77},url:'https://www.zhipin.com/web/geek/chat'};
  assert.equal((await h.send({type:'GET_SEND_INTENT'},unrelated)).data.intent,undefined);assert.equal((await step('dispatching',unrelated)).ok,false);
@@ -172,7 +172,7 @@ test('只对绑定会话授权一次发送，错误对象、新标签和重复�
 test('超时或不确定结果不会重放授权，刷新聊天页不恢复已提交的发送',async()=>{
  const h=reviewSetup(),{data}=await approve(h),id=data.intent.id;
  await h.send({type:'SEND_STEP',id,phase:'opening'},detailSender);
- await h.send({type:'SEND_STEP',id,phase:'dispatching',identity:{url:jobURL,recruiter:'陈女士'}},detailSender);
+ await h.send({type:'SEND_STEP',id,phase:'dispatching',firstMessageState:'empty',identity:{url:jobURL,recruiter:'陈女士'}},detailSender);
  assert.equal((await h.send({type:'GET_SEND_INTENT'},detailSender)).data.intent,undefined);
  assert.equal((await h.send({type:'SEND_STEP',id,phase:'uncertain',error:'页面没有回显'},detailSender)).ok,true);
  assert.equal(h.local.records[jobURL].communication.state,'uncertain');assert.equal((await approve(h)).ok,false);
@@ -184,7 +184,7 @@ test('从当前JD打开的新聊天标签可承接授权，但授权过期后不
  assert.equal((await h.send({type:'GET_SEND_INTENT'},child)).data.intent.id,id);
  await h.send({type:'SEND_STEP',id,phase:'opening'},detailSender);
  h.session.sendIntent.expiresAt=Date.now()-1;
- assert.equal((await h.send({type:'SEND_STEP',id,phase:'dispatching',identity:{url:jobURL,recruiter:'陈女士'}},child)).ok,false);
+ assert.equal((await h.send({type:'SEND_STEP',id,phase:'dispatching',firstMessageState:'empty',identity:{url:jobURL,recruiter:'陈女士'}},child)).ok,false);
 });
 test('人工核对不确定结果可结束本条审核，但不会解除重复发送锁',async()=>{
  const h=reviewSetup();h.local.activeReviewURL=jobURL;const {data}=await approve(h);
@@ -192,4 +192,12 @@ test('人工核对不确定结果可结束本条审核，但不会解除重复�
  assert.equal((await h.send({type:'ACK_SEND_RESULT'},detailSender)).ok,true);assert.equal(h.local.activeReviewURL,null);
  assert.ok(h.local.records[jobURL].communication.manualCheckedAt);assert.equal((await approve(h)).ok,false);
  const next=await h.send({type:'START_RUN'});assert.equal(next.ok,true);await h.send({type:'CANCEL_RUN',token:next.data.token});
+});
+test('后台拒绝旧版补发授权及没有空会话证据的首次发送',async()=>{
+ const h=reviewSetup(),{data}=await approve(h),id=data.intent.id;
+ await h.send({type:'SEND_STEP',id,phase:'opening'},detailSender);
+ assert.equal((await h.send({type:'SEND_STEP',id,phase:'dispatching',identity:{url:jobURL,recruiter:'陈女士'}},detailSender)).ok,false);
+ delete h.session.sendIntent.mode;
+ assert.equal((await h.send({type:'GET_SEND_INTENT'},detailSender)).data.intent,undefined);
+ assert.equal((await h.send({type:'SEND_STEP',id,phase:'dispatching',firstMessageState:'empty',identity:{url:jobURL,recruiter:'陈女士'}},detailSender)).ok,false);
 });

@@ -177,7 +177,7 @@ async function handle(msg, sender) {
   });
   if (msg.type === 'GET_SEND_INTENT' && (isDetail(sender) || isChat(sender))) {
     const {sendIntent:p}=await chrome.storage.session.get('sendIntent');
-    if (!p || p.expiresAt < Date.now() || !['authorized','opening'].includes(p.phase)) return {};
+    if (!p || p.mode!=='first-greeting' || p.expiresAt < Date.now() || !['authorized','opening'].includes(p.phase)) return {};
     const tab=await chrome.tabs.get(sender.tab.id);
     if (sender.tab.id !== p.sourceTabId && tab.openerTabId !== p.sourceTabId) return {};
     if (p.executorTabId && p.executorTabId !== sender.tab.id) return {};
@@ -185,7 +185,7 @@ async function handle(msg, sender) {
   }
   if (msg.type === 'SEND_STEP' && (isDetail(sender) || isChat(sender))) return serializeWrite(async()=>{
     const {sendIntent:p}=await chrome.storage.session.get('sendIntent');
-    if (!p || p.id !== msg.id || p.expiresAt < Date.now()) throw new Error('发送授权已失效；请在BOSS核对结果，不会重试');
+    if (!p || p.mode!=='first-greeting' || p.id !== msg.id || p.expiresAt < Date.now()) throw new Error('发送授权已失效；请在BOSS核对结果，不会重试');
     const tab=await chrome.tabs.get(sender.tab.id);
     const same=sender.tab.id===p.sourceTabId;
     if (!same && tab.openerTabId !== p.sourceTabId) throw new Error('沟通标签不属于本次确认');
@@ -195,6 +195,7 @@ async function handle(msg, sender) {
     if (phase==='opening') {
       if (!same || !isDetail(sender) || BossCore.jobURL(sender.url)!==p.url || p.phase!=='authorized') throw new Error('不能重复点击沟通');
     } else if (phase==='dispatching') {
+      if(msg.firstMessageState!=='empty') throw new Error('只能在已确认无历史消息的新会话发送首次招呼');
       if (p.phase!=='opening' || !BossReview.identityMatches(p,msg.identity) || (p.executorTabId && p.executorTabId!==sender.tab.id)) throw new Error('聊天对象未核实或已经尝试发送');
       p.executorTabId=sender.tab.id;
     } else if (phase==='ui_sent') {

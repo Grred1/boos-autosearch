@@ -13,8 +13,7 @@
     return fallback.length===1?fallback[0]:'';
   }
   function entry(doc=document) {
-    return exact(doc,'.job-banner a,.job-banner button,a.op-btn-chat,button.op-btn-chat','立即沟通') ||
-      exact(doc,'.job-banner a,.job-banner button,a.op-btn-chat,button.op-btn-chat','继续沟通');
+    return exact(doc,'.job-banner a,.job-banner button,a.op-btn-chat,button.op-btn-chat','立即沟通');
   }
   function continuation(doc=document) {
     const dialogs=all(doc,'[role=dialog],.dialog,.dialog-box,.modal');
@@ -48,5 +47,16 @@
     return all(container,'.message-item.is-self .text,.message-item.is-self .message-text,.message-item.right .text,.message-item.right .message-text,.chat-message.is-self .text');
   }
   const echoes=(container,text)=>sentMessages(container).filter(el=>el.textContent.trim()===text.trim()).length;
-  globalThis.BossChatDOM={visible,recruiter,entry,continuation,chat,readInput,fill,echoes};
+  function firstMessageState(container) {
+    // 必须找到当前会话历史列表，不能把“未识别出消息结构”当成空会话。
+    const lists=all(container,'.chat-message-list,.message-list,.chat-record,.chat-history-list');
+    const roots=[...new Set(lists)].filter(root=>!lists.some(other=>other!==root && other.contains(root)));
+    if(roots.length!==1) return 'unknown';
+    const history=roots[0];
+    // 任一文本、附件、表情或系统条目均拒绝自动首条招呼。
+    if(history.textContent.trim() || history.querySelector('img,video,audio,canvas,svg,iframe,.message-item,.chat-message,[class*=message-item]')) return 'occupied';
+    if(history.querySelector('[class*=loading],[aria-busy=true]')) return 'unknown';
+    return 'empty';
+  }
+  globalThis.BossChatDOM={visible,recruiter,entry,continuation,chat,readInput,fill,echoes,firstMessageState};
 })();

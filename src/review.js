@@ -31,14 +31,15 @@
     editable(row);
     if (row.status === 'skip' || !row.jd) throw new Error('此记录已跳过或缺少JD，不能发起沟通');
     draft(msg.greeting);
-    if (msg.acknowledged !== true) throw new Error('请先确认职位、话术和平台默认招呼提示');
+    if (msg.acknowledged !== true) throw new Error('请先确认职位和首次打招呼话术');
+    if (msg.autoGreetingOff !== true) throw new Error('请先关闭BOSS自动招呼并确认，不允许默认招呼后补发');
     if (msg.revision !== (row.draftRevision || 0) || msg.greeting !== row.greeting) throw new Error('话术已变化，请重新加载并审核最新版本');
     const event = saveEdit(row,msg.greeting,msg.note,'confirm');
     const intent = {id:crypto.randomUUID(),url:row.url,title:row.title,company:row.company,
       recruiter:String(msg.recruiter || '').slice(0,200),greeting:row.greeting,
-      sourceTabId:tabId,executorTabId:null,expiresAt:Date.now()+120000,phase:'authorized'};
+      sourceTabId:tabId,executorTabId:null,expiresAt:Date.now()+120000,phase:'authorized',mode:'first-greeting'};
     if (!intent.recruiter.trim()) throw new Error('未识别到招聘者姓名，请人工确认沟通对象');
-    row.communication = {id:intent.id,state:'authorized',at:now(),text:row.greeting};
+    row.communication = {id:intent.id,state:'authorized',mode:'first-greeting',at:now(),text:row.greeting};
     return {intent,event};
   }
   function identityMatches(intent, identity) {
